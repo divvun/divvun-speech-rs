@@ -1,0 +1,19 @@
+[package]
+name = "divvun-speech"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+anyhow = "1.0.86"
+hound = "3.5.1"
+memmap2 = "0.9.4"
+ndarray = "0.15.6"
+ndarray-ndimage = "0.4.0"
+regex = "1.10.6"
+tch = {path = "/Users/brendan/git/github/tch-rs"}# "0.16.0"
+
+
+# opt-level = 3
