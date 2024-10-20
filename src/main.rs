@@ -5,28 +5,35 @@ use tch::TchError;
 
 fn run() -> Result<(), TchError> {
     // let voice_data = ds.forward(" davvisámegiella gullá sámegielaid oarjesámegielaid davvejovkui ovttas julev- ja bihtánsámegielain. ", Default::default())?;
-    // let s = singlethread()?;
-    let m = multithread()?;
+    let s = singlethread()?;
+    // let m = multithread()?;
 
     // println!("{s:?} {m:?}");
-    println!("{m:?}");
+    println!("{s:?}");
     Ok(())
 }
 
 fn singlethread() -> Result<std::time::Duration, TchError> {
     let ds = DivvunSpeech::new(
-        "/Users/brendan/git/divvun/divvun-speech-rs/voice-jit.ptl",
+        "/Users/brendan/git/divvun/divvun-speech-py/voice-jit.ptl",
         // "/Users/brendan/Downloads/torchscript_sme_f.pt",
-        "/Users/brendan/git/divvun/divvun-speech-rs/denoiser-jit.ptl",
-        "/Users/brendan/git/divvun/divvun-speech-rs/vocoder-jit.ptl",
+        "/Users/brendan/git/divvun/divvun-speech-py/denoiser-jit.ptl",
+        "/Users/brendan/git/divvun/divvun-speech-py/vocoder-jit.ptl",
         SME_EXPANDED,
         Device::Cpu,
     ).unwrap();
 
     let start = std::time::Instant::now();
+    let text = "This is an example string";
 
     for _ in 0..100 {
-        let voice_data = ds.forward(" davvisámegiella gullá sámegielaid oarjesámegielaid davvejovkui ovttas julev- ja bihtánsámegielain. ", Default::default()).unwrap();
+        let voice_data = match ds.forward(text, Default::default()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return Err(e);
+            }
+        };
         let _wav_data = DivvunSpeech::generate_wav(voice_data.copy()).unwrap();
     }
 

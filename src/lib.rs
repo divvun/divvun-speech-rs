@@ -111,6 +111,7 @@ impl<'a> DivvunSpeech<'a> {
             IValue::Tensor(speaker),
             IValue::Tensor(pace),
         ])?;
+        println!("Hmm: {:?}", result);
         let voice_data: Tensor = match result {
             IValue::Tuple(mut x) => x.remove(0).try_into().unwrap(),
             _ => unreachable!(),
@@ -120,7 +121,7 @@ impl<'a> DivvunSpeech<'a> {
 
     fn process_vocoder(&self, mel: Tensor) -> Result<Tensor, TchError> {
         let y_g_hat = match self.vocoder.forward_ts(&[mel]) {
-            Ok(v) => v.squeeze_dim(1),
+            Ok(v) => v.to_kind(Kind::Float).squeeze_dim(1),
             Err(e) => {
                 return Err(e);
             }
@@ -130,7 +131,7 @@ impl<'a> DivvunSpeech<'a> {
     }
 
     fn process_denoiser(&self, y_g_hat: Tensor) -> Result<Tensor, TchError> {
-        let y_g_hat = self.denoiser.forward_ts(&[y_g_hat.to_kind(Kind::Float)])?;
+        let y_g_hat = self.denoiser.forward_ts(&[y_g_hat])?;
 
         Ok(y_g_hat)
     }
@@ -199,18 +200,24 @@ impl<'a> DivvunSpeech<'a> {
 
         println!("Text proc");
         let input = self.text_processor.encode_text(input);
+        println!("{:?}", input);
         println!("Input to device");
-        let input = tch::Tensor::from_slice(&input).to(self.device);
-        let input = tch::Tensor::stack(&[input], 0).to(self.device);
+        let input = tch::Tensor::from_slice2(&[&input]);
+        // let input = tch::Tensor::from_slice(&input).to(self.device);
+        println!("{:?}", input);
 
         println!("Proc voice");
-        let mel = self.process_voice(input.to(self.device), &options)?;
+        let mel = self.process_voice(input, &options)?;
+        println!("{:?}", mel.size());
         println!("Sharpen");
         let mel = self.sharpen(mel.to_device(tch::Device::Cpu))?;
+        println!("{:?}", mel.size());
         println!("vocode");
         let y_g_hat = self.process_vocoder(mel)?;
-        // let y_g_hat = mel.squeeze_dim(1);
-        // let y_g_hat = self.process_denoiser(y_g_hat)?; //y_g_hat)?;
+        println!("{:?}", y_g_hat.size());
+        // let y_g_hat = y_g_hat.unsqueeze(0);
+        let y_g_hat = self.process_denoiser(y_g_hat)?; //y_g_hat)?;
+        println!("{:?}", y_g_hat.size());
 
         Ok(y_g_hat)
         // });
@@ -230,8 +237,8 @@ use std::collections::HashMap;
 // Define your structs and implementations here
 struct TextProcessor<'a> {
     symbols: SymbolSet<'a>,
-    symbol_to_id: HashMap<String, i64>,
-    id_to_symbol: HashMap<i64, String>,
+    symbol_to_id: HashMap<String, i32>,
+    id_to_symbol: HashMap<i32, String>,
 }
 
 impl<'a> TextProcessor<'a> {
@@ -255,12 +262,12 @@ impl<'a> TextProcessor<'a> {
         }
     }
 
-    fn text_to_sequence(&self, text: &str) -> Vec<i64> {
+    fn text_to_sequence(&self, text: &str) -> Vec<i32> {
         let mut sequence = self.symbols_to_sequence(&text);
         sequence
     }
 
-    fn sequence_to_text(&self, sequence: Vec<i64>) -> String {
+    fn sequence_to_text(&self, sequence: Vec<i32>) -> String {
         sequence
             .iter()
             .filter_map(|&symbol_id| self.id_to_symbol.get(&symbol_id).map(|x| &**x))
@@ -268,17 +275,21 @@ impl<'a> TextProcessor<'a> {
             .join("")
     }
 
-    fn symbols_to_sequence(&self, symbols: &str) -> Vec<i64> {
+    fn symbols_to_sequence(&self, symbols: &str) -> Vec<i32> {
         symbols
             .chars()
             .filter_map(|c| self.symbol_to_id.get(&c.to_string()).cloned())
             .collect()
     }
 
-    fn encode_text(&self, text: &str) -> Vec<i64> {
+    fn encode_text(&self, text: &str) -> Vec<i32> {
         let mut text = text.to_string();
 
-        let text_encoded = self.text_to_sequence(&text);
+        let mut text_encoded = self.text_to_sequence(&text);
+
+        // Hack: add spaces at beginning and end
+        text_encoded.insert(0, 9);
+        text_encoded.push(9);
 
         text_encoded
     }

@@ -1,5 +1,6 @@
 build:
     LIBTORCH=/opt/libtorch LIBTORCH_BYPASS_VERSION_CHECK=1 cargo build --release
+    install_name_tool -add_rpath /opt/homebrew/lib target/release/divvun-speech
     install_name_tool -add_rpath /opt/libtorch/lib target/release/divvun-speech
     # cp /opt/libtorch/lib/libtorch_cpu.dylib target/release
 
