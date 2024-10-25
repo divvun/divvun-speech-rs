@@ -1,18 +1,17 @@
+use memmap2::{Mmap, MmapOptions};
+use ndarray::{s, Array, Array2, ArrayD};
+use ndarray_ndimage::{gaussian_filter, BorderMode};
 use std::{
     borrow::{BorrowMut, Cow},
+    collections::HashMap,
     error::Error,
     ops::Deref,
     path::Path,
 };
-
-use memmap2::{Mmap, MmapOptions};
-use ndarray::{s, Array, Array2, ArrayD};
-use ndarray_ndimage::{gaussian_filter, BorderMode};
 use tch::{nn::Module, IValue, Kind, Scalar, TchError, Tensor};
 
 pub struct DivvunSpeech<'a> {
     voice: tch::CModule,
-    denoiser: tch::CModule,
     vocoder: tch::CModule,
     device: tch::Device,
     text_processor: TextProcessor<'a>,
@@ -39,7 +38,6 @@ impl From<Device> for tch::Device {
 impl<'a> DivvunSpeech<'a> {
     pub unsafe fn from_memory_map(
         voice: &Mmap,
-        denoiser: &Mmap,
         vocoder: &Mmap,
         symbol_set: SymbolSet<'a>,
         device: Device,
@@ -48,13 +46,12 @@ impl<'a> DivvunSpeech<'a> {
 
         let mut voice =
             unsafe { tch::CModule::load_ptr_on_device(voice.as_ptr() as _, voice.len(), device) }?;
-        let mut denoiser =
-            unsafe { tch::CModule::load_ptr_on_device(denoiser.as_ptr() as _, denoiser.len(), device) }?;
-        let mut vocoder = unsafe { tch::CModule::load_ptr_on_device(vocoder.as_ptr() as _, vocoder.len(), device) }?;
+        let mut vocoder = unsafe {
+            tch::CModule::load_ptr_on_device(vocoder.as_ptr() as _, vocoder.len(), device)
+        }?;
 
         Ok(Self {
             voice,
-            denoiser,
             vocoder,
             device,
             text_processor: TextProcessor::new(symbol_set),
@@ -63,40 +60,30 @@ impl<'a> DivvunSpeech<'a> {
 
     pub fn new(
         voice_path: impl AsRef<Path>,
-        denoiser_path: impl AsRef<Path>,
         vocoder_path: impl AsRef<Path>,
         symbol_set: SymbolSet<'a>,
         device: Device,
     ) -> Result<Self, TchError> {
         let device: tch::Device = device.into();
 
-        println!("Loading voice");
+        tracing::debug!("Loading voice");
         let file = std::fs::File::open(voice_path).unwrap();
         let file = unsafe { MmapOptions::new().map(&file).unwrap() };
-        let mut voice =
-            unsafe { tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu) }?;
+        let mut voice = unsafe {
+            tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu)
+        }?;
         voice.to(device, Kind::Float, false);
-        // let mut voice = tch::CModule::load_on_device(voice_path, device)?;
-        // voice.set_eval();
 
-        println!("Loading denoiser");
-        let file = std::fs::File::open(denoiser_path).unwrap();
-        let file = unsafe { MmapOptions::new().map(&file).unwrap() };
-        let mut denoiser =
-            unsafe { tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu) }?;
-        // denoiser.set_eval();
-        // denoiser.to(device, Kind::Float, false);
-
-        println!("Loading vocoder");
+        tracing::debug!("Loading vocoder");
         let file = std::fs::File::open(vocoder_path).unwrap();
         let file = unsafe { MmapOptions::new().map(&file).unwrap() };
-        let mut vocoder =
-            unsafe { tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu) }?;
+        let mut vocoder = unsafe {
+            tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu)
+        }?;
         // vocoder.set_eval();
 
         Ok(Self {
             voice,
-            denoiser,
             vocoder,
             device,
             text_processor: TextProcessor::new(symbol_set),
@@ -106,12 +93,14 @@ impl<'a> DivvunSpeech<'a> {
     fn process_voice(&self, input: Tensor, options: &Options) -> Result<Tensor, TchError> {
         let speaker = Tensor::from_i32(options.speaker);
         let pace = Tensor::from_f32(options.pace);
+
+        tracing::debug!("Options: {:?}", options);
+
         let result = self.voice.forward_is(&[
             IValue::Tensor(input),
             IValue::Tensor(speaker),
             IValue::Tensor(pace),
         ])?;
-        println!("Hmm: {:?}", result);
         let voice_data: Tensor = match result {
             IValue::Tuple(mut x) => x.remove(0).try_into().unwrap(),
             _ => unreachable!(),
@@ -126,12 +115,6 @@ impl<'a> DivvunSpeech<'a> {
                 return Err(e);
             }
         };
-
-        Ok(y_g_hat)
-    }
-
-    fn process_denoiser(&self, y_g_hat: Tensor) -> Result<Tensor, TchError> {
-        let y_g_hat = self.denoiser.forward_ts(&[y_g_hat])?;
 
         Ok(y_g_hat)
     }
@@ -165,7 +148,7 @@ impl<'a> DivvunSpeech<'a> {
 
         let mut result = Tensor::try_from(sharpened).unwrap();
         result = result.to_kind(Kind::Float).unsqueeze(0);
-        // println!("{:?}", &result);
+        // tracing::debug!("{:?}", &result);
         Ok(result)
     }
 
@@ -194,47 +177,30 @@ impl<'a> DivvunSpeech<'a> {
     }
 
     pub fn forward(&self, input: &str, options: Options) -> Result<Tensor, TchError> {
-        println!("Forwarding");
-        // let result = std::panic::catch_unwind(|| {
+        tracing::debug!("Forwarding");
         let _guard = tch::no_grad_guard();
 
-        println!("Text proc");
+        tracing::debug!("Text proc");
         let input = self.text_processor.encode_text(input);
-        println!("{:?}", input);
-        println!("Input to device");
+        tracing::trace!("{:?}", input);
+        tracing::debug!("Input to device");
         let input = tch::Tensor::from_slice2(&[&input]);
-        // let input = tch::Tensor::from_slice(&input).to(self.device);
-        println!("{:?}", input);
+        tracing::trace!("{:?}", input);
 
-        println!("Proc voice");
+        tracing::debug!("Proc voice");
         let mel = self.process_voice(input, &options)?;
-        println!("{:?}", mel.size());
-        println!("Sharpen");
+        tracing::debug!("{:?}", mel.size());
+        tracing::debug!("Sharpen");
         let mel = self.sharpen(mel.to_device(tch::Device::Cpu))?;
-        println!("{:?}", mel.size());
-        println!("vocode");
+        tracing::debug!("{:?}", mel.size());
+        tracing::debug!("vocode");
         let y_g_hat = self.process_vocoder(mel)?;
-        println!("{:?}", y_g_hat.size());
-        // let y_g_hat = y_g_hat.unsqueeze(0);
-        let y_g_hat = self.process_denoiser(y_g_hat)?; //y_g_hat)?;
-        println!("{:?}", y_g_hat.size());
+        tracing::debug!("{:?}", y_g_hat.size());
 
         Ok(y_g_hat)
-        // });
-
-        // match result {
-        //     Ok(value) => value,
-        //     Err(e) => {
-        //         println!("Error: {:?}", e);
-        //         Err(TchError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e))))
-        //     }
-        // }
     }
 }
 
-use std::collections::HashMap;
-
-// Define your structs and implementations here
 struct TextProcessor<'a> {
     symbols: SymbolSet<'a>,
     symbol_to_id: HashMap<String, i32>,
@@ -326,4 +292,11 @@ pub const SME_EXPANDED: SymbolSet<'static> = SymbolSet::new(&[
     "Š", "T", "Ŧ", "U", "V", "W", "X", "Y", "Z", "Ž", "a", "á", "æ", "å", "ä", "b", "c", "č", "d",
     "đ", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "ŋ", "o", "ø", "ö", "p", "q", "r", "s",
     "š", "t", "ŧ", "u", "v", "w", "x", "y", "z", "ž",
+]);
+
+pub const SMA_EXPANDED: SymbolSet<'static> = SymbolSet::new(&[
+    "!", "'", "\"", ",", ".", ":", ";", "?", "-", " ", "A", "Æ", "Å", "B", "C", "D", "E", "F", "G",
+    "H", "I", "Ï", "J", "K", "L", "M", "N", "O", "Ø", "Ö", "P", "Q", "R", "S", "T", "U", "V", "W",
+    "X", "Y", "Z", "a", "æ", "å", "b", "c", "d", "e", "f", "g", "h", "i", "ï", "j", "k", "l", "m",
+    "n", "o", "ø", "ö", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
 ]);

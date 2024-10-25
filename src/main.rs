@@ -17,11 +17,12 @@ fn singlethread() -> Result<std::time::Duration, TchError> {
     let ds = DivvunSpeech::new(
         "/Users/brendan/git/divvun/divvun-speech-py/voice-jit.ptl",
         // "/Users/brendan/Downloads/torchscript_sme_f.pt",
-        "/Users/brendan/git/divvun/divvun-speech-py/denoiser-jit.ptl",
+        // "/Users/brendan/git/divvun/divvun-speech-py/denoiser-jit.ptl",
         "/Users/brendan/git/divvun/divvun-speech-py/vocoder-jit.ptl",
         SME_EXPANDED,
         Device::Cpu,
-    ).unwrap();
+    )
+    .unwrap();
 
     let start = std::time::Instant::now();
     let text = "This is an example string";
@@ -47,14 +48,21 @@ fn singlethread() -> Result<std::time::Duration, TchError> {
 fn multithread() -> Result<std::time::Duration, TchError> {
     let mut threads = vec![];
 
-    let units = (0..8).map(|_| Arc::new(DivvunSpeech::new(
-        "/Users/brendan/git/divvun/divvun-speech-rs/voice-jit.ptl",
-        // "/Users/brendan/Downloads/torchscript_sme_f.pt",
-        "/Users/brendan/git/divvun/divvun-speech-rs/denoiser-jit.ptl",
-        "/Users/brendan/git/divvun/divvun-speech-rs/vocoder-jit.ptl",
-        SME_EXPANDED,
-        Device::Cpu,
-    ).unwrap())).collect::<Vec<_>>();
+    let units = (0..8)
+        .map(|_| {
+            Arc::new(
+                DivvunSpeech::new(
+                    "/Users/brendan/git/divvun/divvun-speech-rs/voice-jit.ptl",
+                    // "/Users/brendan/Downloads/torchscript_sme_f.pt",
+                    // "/Users/brendan/git/divvun/divvun-speech-rs/denoiser-jit.ptl",
+                    "/Users/brendan/git/divvun/divvun-speech-rs/vocoder-jit.ptl",
+                    SME_EXPANDED,
+                    Device::Cpu,
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
 
     let start = std::time::Instant::now();
 

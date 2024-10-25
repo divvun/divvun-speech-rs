@@ -14,6 +14,7 @@ ndarray = "0.15.6"
 ndarray-ndimage = "0.4.0"
 regex = "1.10.6"
 tch = {path = "/Users/brendan/git/github/tch-rs"}# "0.16.0"
+tracing = "0.1.40"
 
 
 # opt-level = 3
