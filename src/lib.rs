@@ -1,14 +1,13 @@
 use memmap2::{Mmap, MmapOptions};
-use ndarray::{s, Array, Array2, ArrayD};
+use ndarray::{s, Array2, ArrayD};
 use ndarray_ndimage::{gaussian_filter, BorderMode};
 use std::{
-    borrow::{BorrowMut, Cow},
+    borrow::Cow,
     collections::HashMap,
-    error::Error,
     ops::Deref,
     path::Path,
 };
-use tch::{nn::Module, IValue, Kind, Scalar, TchError, Tensor};
+use tch::{IValue, Kind, TchError, Tensor};
 
 pub struct DivvunSpeech<'a> {
     voice: tch::CModule,
@@ -77,10 +76,9 @@ impl<'a> DivvunSpeech<'a> {
         tracing::debug!("Loading vocoder");
         let file = std::fs::File::open(vocoder_path).unwrap();
         let file = unsafe { MmapOptions::new().map(&file).unwrap() };
-        let mut vocoder = unsafe {
+        let vocoder = unsafe {
             tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu)
         }?;
-        // vocoder.set_eval();
 
         Ok(Self {
             voice,
@@ -249,7 +247,7 @@ impl<'a> TextProcessor<'a> {
     }
 
     fn encode_text(&self, text: &str) -> Vec<i32> {
-        let mut text = text.to_string();
+        let text = text.to_string();
 
         let mut text_encoded = self.text_to_sequence(&text);
 
