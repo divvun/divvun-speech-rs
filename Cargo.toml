@@ -13,7 +13,7 @@ memmap2 = "0.9.4"
 ndarray = "0.15.6"
 ndarray-ndimage = "0.4.0"
 regex = "1.10.6"
-tch = { git = "ssh://git@github.com/necessary-nu/tch-rs" } # "0.16.0"
+tch = { git = "ssh://git@github.com/divvun/tch-rs" } # "0.16.0"
 tracing = "0.1.40"
 
 

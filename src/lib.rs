@@ -20,6 +20,7 @@ pub struct DivvunSpeech<'a> {
 pub struct Options {
     pub speaker: i32,
     pub pace: f32,
+    pub language: i32,
 }
 
 pub enum Device {
@@ -91,13 +92,14 @@ impl<'a> DivvunSpeech<'a> {
     fn process_voice(&self, input: Tensor, options: &Options) -> Result<Tensor, TchError> {
         let speaker = Tensor::from_i32(options.speaker);
         let pace = Tensor::from_f32(options.pace);
-
+        let language = Tensor::from_i32(options.language);
         tracing::debug!("Options: {:?}", options);
 
         let result = self.voice.forward_is(&[
             IValue::Tensor(input),
             IValue::Tensor(speaker),
             IValue::Tensor(pace),
+            IValue::Tensor(language),
         ])?;
         let voice_data: Tensor = match result {
             IValue::Tuple(mut x) => x.remove(0).try_into().unwrap(),
