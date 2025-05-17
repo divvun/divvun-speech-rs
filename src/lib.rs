@@ -1,12 +1,7 @@
 use memmap2::{Mmap, MmapOptions};
 use ndarray::{s, Array2, ArrayD};
 use ndarray_ndimage::{gaussian_filter, BorderMode};
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    ops::Deref,
-    path::Path,
-};
+use std::{borrow::Cow, collections::HashMap, ops::Deref, path::Path};
 use tch::{IValue, Kind, TchError, Tensor};
 
 pub struct DivvunSpeech<'a> {
@@ -91,15 +86,15 @@ impl<'a> DivvunSpeech<'a> {
 
     fn process_voice(&self, input: Tensor, options: &Options) -> Result<Tensor, TchError> {
         let speaker = Tensor::from_i32(options.speaker);
-        let pace = Tensor::from_f32(options.pace);
         let language = Tensor::from_i32(options.language);
+        let pace = Tensor::from_f32(options.pace);
         tracing::debug!("Options: {:?}", options);
 
         let result = self.voice.forward_is(&[
             IValue::Tensor(input),
             IValue::Tensor(speaker),
-            IValue::Tensor(pace),
             IValue::Tensor(language),
+            IValue::Tensor(pace),
         ])?;
         let voice_data: Tensor = match result {
             IValue::Tuple(mut x) => x.remove(0).try_into().unwrap(),
@@ -299,4 +294,12 @@ pub const SMA_EXPANDED: SymbolSet<'static> = SymbolSet::new(&[
     "H", "I", "Ï", "J", "K", "L", "M", "N", "O", "Ø", "Ö", "P", "Q", "R", "S", "T", "U", "V", "W",
     "X", "Y", "Z", "a", "æ", "å", "b", "c", "d", "e", "f", "g", "h", "i", "ï", "j", "k", "l", "m",
     "n", "o", "ø", "ö", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+]);
+
+pub const ALL_SAMI: SymbolSet<'static> = SymbolSet::new(&[
+    "!", "'", "\"", ",", ".", ":", ";", "?", "-", " ", "A", "Á", "Æ", "Å", "Ä", "B", "C", "Č", "D",
+    "Đ", "E", "F", "G", "H", "I", "Ï", "J", "K", "L", "M", "N", "Ŋ", "Ń", "Ñ", "O", "Ø", "Ö", "P",
+    "Q", "R", "S", "Š", "T", "Ŧ", "U", "V", "W", "X", "Y", "Z", "Ž", "a", "á", "æ", "å", "ä", "b",
+    "c", "č", "d", "đ", "e", "f", "g", "h", "i", "ï", "j", "k", "l", "m", "n", "ŋ", "ń", "ñ", "o",
+    "ø", "ö", "p", "q", "r", "s", "š", "t", "ŧ", "u", "v", "w", "x", "y", "z", "ž",
 ]);
