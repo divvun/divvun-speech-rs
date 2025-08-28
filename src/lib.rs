@@ -1,6 +1,6 @@
 use memmap2::{Mmap, MmapOptions};
-use ndarray::{s, Array2, ArrayD};
-use ndarray_ndimage::{gaussian_filter, BorderMode};
+use ndarray::{Array2, ArrayD, s};
+use ndarray_ndimage::{BorderMode, gaussian_filter};
 use std::{borrow::Cow, collections::HashMap, ops::Deref, path::Path};
 use tch::{IValue, Kind, TchError, Tensor};
 
@@ -31,27 +31,27 @@ impl From<Device> for tch::Device {
 }
 
 impl<'a> DivvunSpeech<'a> {
-    pub unsafe fn from_memory_map(
-        voice: &Mmap,
-        vocoder: &Mmap,
-        symbol_set: SymbolSet<'a>,
-        device: Device,
-    ) -> Result<Self, TchError> {
-        let device: tch::Device = device.into();
+    // pub unsafe fn from_memory_map(
+    //     voice: &Mmap,
+    //     vocoder: &Mmap,
+    //     symbol_set: SymbolSet<'a>,
+    //     device: Device,
+    // ) -> Result<Self, TchError> {
+    //     let device: tch::Device = device.into();
 
-        let mut voice =
-            unsafe { tch::CModule::load_ptr_on_device(voice.as_ptr() as _, voice.len(), device) }?;
-        let mut vocoder = unsafe {
-            tch::CModule::load_ptr_on_device(vocoder.as_ptr() as _, vocoder.len(), device)
-        }?;
+    //     let mut voice =
+    //         unsafe { tch::CModule::load_ptr_on_device(voice.as_ptr() as _, voice.len(), device) }?;
+    //     let mut vocoder = unsafe {
+    //         tch::CModule::load_ptr_on_device(vocoder.as_ptr() as _, vocoder.len(), device)
+    //     }?;
 
-        Ok(Self {
-            voice,
-            vocoder,
-            device,
-            text_processor: TextProcessor::new(symbol_set),
-        })
-    }
+    //     Ok(Self {
+    //         voice,
+    //         vocoder,
+    //         device,
+    //         text_processor: TextProcessor::new(symbol_set),
+    //     })
+    // }
 
     pub fn new(
         voice_path: impl AsRef<Path>,
@@ -62,19 +62,11 @@ impl<'a> DivvunSpeech<'a> {
         let device: tch::Device = device.into();
 
         tracing::debug!("Loading voice");
-        let file = std::fs::File::open(voice_path).unwrap();
-        let file = unsafe { MmapOptions::new().map(&file).unwrap() };
-        let mut voice = unsafe {
-            tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu)
-        }?;
+        let mut voice = tch::CModule::load_on_device(voice_path, tch::Device::Cpu)?;
         voice.to(device, Kind::Float, false);
 
         tracing::debug!("Loading vocoder");
-        let file = std::fs::File::open(vocoder_path).unwrap();
-        let file = unsafe { MmapOptions::new().map(&file).unwrap() };
-        let vocoder = unsafe {
-            tch::CModule::load_ptr_on_device(file.as_ptr() as _, file.len(), tch::Device::Cpu)
-        }?;
+        let vocoder = tch::CModule::load_on_device(vocoder_path, tch::Device::Cpu)?;
 
         Ok(Self {
             voice,
@@ -85,9 +77,9 @@ impl<'a> DivvunSpeech<'a> {
     }
 
     fn process_voice(&self, input: Tensor, options: &Options) -> Result<Tensor, TchError> {
-        let speaker = Tensor::from_i32(options.speaker);
-        let language = Tensor::from_i32(options.language);
-        let pace = Tensor::from_f32(options.pace);
+        let speaker = Tensor::from(options.speaker);
+        let language = Tensor::from(options.language);
+        let pace = Tensor::from(options.pace);
         tracing::debug!("Options: {:?}", options);
 
         let result = self.voice.forward_is(&[
