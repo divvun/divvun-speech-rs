@@ -696,7 +696,7 @@ dependencies = [
 [[package]]
 name = "tch"
 version = "0.17.0"
-source = "git+ssh://git@github.com/divvun/tch-rs#34acc3db565ed8b80760b4cc7bc76d657bbd9be1"
+source = "git+https://github.com/divvun/tch-rs#34acc3db565ed8b80760b4cc7bc76d657bbd9be1"
 dependencies = [
  "half",
  "lazy_static",
@@ -752,7 +752,7 @@ checksum = "c9e9a38711f559d9e3ce1cdb06dd7c5b8ea546bc90052da6d06bb76da74bb07c"
 [[package]]
 name = "torch-sys"
 version = "0.17.0"
-source = "git+ssh://git@github.com/divvun/tch-rs#34acc3db565ed8b80760b4cc7bc76d657bbd9be1"
+source = "git+https://github.com/divvun/tch-rs#34acc3db565ed8b80760b4cc7bc76d657bbd9be1"
 dependencies = [
  "anyhow",
  "cc",
