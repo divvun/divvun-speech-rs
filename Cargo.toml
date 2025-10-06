@@ -7,12 +7,12 @@ edition = "2024"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
-anyhow = "1.0.86"
+anyhow = "1.0.100"
 hound = "3.5.1"
 memmap2 = "0.9.4"
 ndarray = "0.16.1"
 ndarray-ndimage = "0.5.0"
-regex = "1.11.2"
+regex = "1.11.3"
 tch = "0.20"
 tracing = "0.1.40"
 
