@@ -6,4 +6,10 @@ fn main() {
 
     println!("cargo:rustc-link-lib=pthreadpool");
     println!("cargo:rustc-link-lib=cpuinfo");
+
+    if target.contains("linux") {
+        println!("cargo:rustc-link-lib=gomp");
+    } else {
+        println!("cargo:rustc-link-lib=omp");
+    }
 }
