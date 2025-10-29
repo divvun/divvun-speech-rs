@@ -3,4 +3,7 @@ fn main() {
     if let Ok(path) = std::env::var("LIBTORCH") {
         println!("cargo:rustc-link-search=native={}/lib", path);
     }
+
+    println!("cargo:rustc-link-lib=pthreadpool");
+    println!("cargo:rustc-link-lib=cpuinfo");
 }
