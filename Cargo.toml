@@ -16,3 +16,10 @@ regex = "1.11.3"
 tch = "0.20"
 tracing = "0.1.40"
 
+
+[patch.crates-io]
+tch = { git = "https://github.com/bbqsrc/tch-rs", version = "0.20", branch = "oof3" }
+torch-sys = { git = "https://github.com/bbqsrc/tch-rs", version = "0.19", branch = "oof3" }
+
+[profile.dev]
+panic = "abort"
