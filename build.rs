@@ -1,5 +1,4 @@
 fn main() {
-    let target = std::env::var("TARGET").expect("TARGET variable not set");
     if let Ok(path) = std::env::var("LIBTORCH") {
         println!("cargo:rustc-link-search=native={}/lib", path);
     }
@@ -9,5 +8,5 @@ fn main() {
     println!("cargo:rustc-link-lib=c10");
     println!("cargo:rustc-link-lib=torch");
     println!("cargo:rustc-link-lib=torch_cpu");
-
+    println!("cargo:rustc-link-lib=omp");
 }
