@@ -5,8 +5,8 @@ fn main() {
         .expect("EXECUTORCH_SYSROOT environment variable must be set");
     let executorch_sysroot = PathBuf::from(executorch_sysroot);
 
-    let executorch_src = std::env::var("EXECUTORCH_SRC")
-        .expect("EXECUTORCH_SRC environment variable must be set");
+    let executorch_src =
+        std::env::var("EXECUTORCH_SRC").expect("EXECUTORCH_SRC environment variable must be set");
     let executorch_src = PathBuf::from(executorch_src);
 
     // Build wrapper with cmake
@@ -58,31 +58,68 @@ fn main() {
         }
     }
 
-    // Platform-specific libraries
-    #[cfg(target_os = "macos")]
-    {
-        // Find clang runtime for ___isPlatformVersionAtLeast
+    // Platform-specific libraries (use CARGO_CFG_TARGET_OS for cross-compilation)
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    if target_os == "macos" || target_os == "ios" {
+        // Find clang runtime dir
         let clang_rt_dir = std::process::Command::new("clang")
             .arg("--print-runtime-dir")
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-        if let Some(dir) = clang_rt_dir {
-            println!("cargo:rustc-link-search=native={}", dir);
-            println!("cargo:rustc-link-lib=static=clang_rt.osx");
+            .map(|s| s.trim().to_string())
+            .expect("failed to find clang runtime directory");
+
+        let rt_lib = if target_os == "ios" {
+            "clang_rt.ios"
+        } else {
+            "clang_rt.osx"
+        };
+
+        // iOS clang_rt is a fat binary; extract thin slice for Rust linker
+        if target_os == "ios" {
+            let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+            // Map Rust arch names to Apple/lipo arch names
+            let apple_arch = match target_arch.as_str() {
+                "aarch64" => "arm64",
+                "x86_64" => "x86_64",
+                other => other,
+            };
+            let out_dir = std::env::var("OUT_DIR").unwrap();
+            let fat_lib = PathBuf::from(&clang_rt_dir).join(format!("lib{}.a", rt_lib));
+            let thin_lib = PathBuf::from(&out_dir).join(format!("lib{}.a", rt_lib));
+            let status = std::process::Command::new("lipo")
+                .args([
+                    "-thin",
+                    apple_arch,
+                    fat_lib.to_str().unwrap(),
+                    "-output",
+                    thin_lib.to_str().unwrap(),
+                ])
+                .status()
+                .expect("failed to run lipo");
+            assert!(
+                status.success(),
+                "lipo failed to extract {} slice",
+                apple_arch
+            );
+            println!("cargo:rustc-link-search=native={}", out_dir);
+        } else {
+            println!("cargo:rustc-link-search=native={}", clang_rt_dir);
+        }
+        println!("cargo:rustc-link-lib=static={}", rt_lib);
+
+        if target_os == "macos" {
+            println!("cargo:rustc-link-arg=-mmacosx-version-min=15.0");
         }
 
-        println!("cargo:rustc-link-arg=-mmacosx-version-min=15.0");
         println!("cargo:rustc-link-lib=framework=Foundation");
         println!("cargo:rustc-link-lib=framework=CoreML");
         println!("cargo:rustc-link-lib=framework=Accelerate");
         println!("cargo:rustc-link-lib=sqlite3");
         println!("cargo:rustc-link-lib=c++");
-    }
-
-    #[cfg(target_os = "linux")]
-    {
+    } else if target_os == "linux" {
         println!("cargo:rustc-link-lib=stdc++");
     }
 
