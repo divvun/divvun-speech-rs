@@ -1,25 +1,15 @@
 [package]
 name = "divvun-speech"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [lib]
-crate-type = ["lib", "staticlib", "cdylib"]
+crate-type = ["lib", "staticlib"]
+
+[build-dependencies]
+cmake = "0.1"
 
 [dependencies]
-anyhow = "1.0.100"
-hound = "3.5.1"
-memmap2 = "0.9.4"
-ndarray = "0.16.1"
-ndarray-ndimage = "0.5.0"
-regex = "1.11.3"
-tch = "0.20"
-tracing = "0.1.40"
-
-
-[patch.crates-io]
-tch = { git = "https://github.com/bbqsrc/tch-rs", version = "0.20", branch = "oof3" }
-torch-sys = { git = "https://github.com/bbqsrc/tch-rs", version = "0.19", branch = "oof3" }
-
-[profile.dev]
-panic = "abort"
+libc = "0.2"
+thiserror = "2"
+serde_json = "1"

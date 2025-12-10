@@ -1,297 +1,223 @@
-use memmap2::{Mmap, MmapOptions};
-use ndarray::{Array2, ArrayD, s};
-use ndarray_ndimage::{BorderMode, gaussian_filter};
-use std::{borrow::Cow, collections::HashMap, ops::Deref, path::Path};
-use tch::{IValue, Kind, TchError, Tensor};
+pub mod symbols;
+mod text;
 
-pub struct DivvunSpeech<'a> {
-    voice: tch::CModule,
-    vocoder: tch::CModule,
-    device: tch::Device,
-    text_processor: TextProcessor<'a>,
+use std::ffi::CString;
+use std::path::Path;
+
+pub use symbols::*;
+pub use text::{SymbolSet, TextProcessor};
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    // Rust-only errors (negative)
+    #[error("Invalid JSON in alphabet")]
+    InvalidAlphabetJson = -3,
+    #[error("Invalid path")]
+    InvalidPath = -2,
+    #[error("Empty input")]
+    EmptyInput = -1,
+
+    // C API errors (match wrapper.hpp TtsError enum)
+    #[error("Success")]
+    Ok = 0,
+    #[error("Invalid argument")]
+    InvalidArgument = 1,
+    #[error("Failed to load voice model")]
+    VoiceLoadFailed = 2,
+    #[error("Failed to load vocoder model")]
+    VocoderLoadFailed = 3,
+    #[error("Failed to load voice method")]
+    VoiceMethodLoadFailed = 4,
+    #[error("Failed to load vocoder method")]
+    VocoderMethodLoadFailed = 5,
+    #[error("Failed to set voice input")]
+    VoiceInputFailed = 6,
+    #[error("Failed to set vocoder input")]
+    VocoderInputFailed = 7,
+    #[error("Voice model execution failed")]
+    VoiceExecuteFailed = 8,
+    #[error("Vocoder execution failed")]
+    VocoderExecuteFailed = 9,
+    #[error("Voice model output is invalid")]
+    VoiceOutputInvalid = 10,
+    #[error("Vocoder output is invalid")]
+    VocoderOutputInvalid = 11,
+    #[error("Shape mismatch between voice and vocoder")]
+    ShapeMismatch = 12,
+    #[error("No alphabet embedded in voice model")]
+    NoAlphabet = 13,
+}
+
+unsafe extern "C" {
+    fn tts_synthesizer_new(
+        voice: *const i8,
+        vocoder: *const i8,
+        out_error: *mut Error,
+    ) -> *mut std::ffi::c_void;
+    fn tts_synthesizer_free(ptr: *mut std::ffi::c_void);
+    fn tts_synthesize(
+        synth: *mut std::ffi::c_void,
+        tokens: *const i64,
+        token_count: usize,
+        speaker_id: i64,
+        language_id: i64,
+        pace: f32,
+        out_sample_count: *mut usize,
+        out_error: *mut Error,
+    ) -> *mut f32;
+    fn tts_free_audio(audio: *mut f32);
+    fn tts_get_alphabet(
+        synth: *mut std::ffi::c_void,
+        out_len: *mut usize,
+        out_error: *mut Error,
+    ) -> *const i8;
+    fn tts_free_alphabet(data: *const i8);
+}
+
+pub struct Synthesizer {
+    ptr: *mut std::ffi::c_void,
+    text_processor: TextProcessor,
+}
+
+unsafe impl Send for Synthesizer {}
+
+impl Drop for Synthesizer {
+    fn drop(&mut self) {
+        unsafe { tts_synthesizer_free(self.ptr) };
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
-    pub speaker: i32,
+    pub speaker_id: i64,
+    pub language_id: i64,
     pub pace: f32,
-    pub language: i32,
 }
 
-pub enum Device {
-    Cpu,
-}
-
-impl From<Device> for tch::Device {
-    fn from(value: Device) -> Self {
-        match value {
-            Device::Cpu => tch::Device::Cpu,
+impl Options {
+    pub fn new() -> Self {
+        Self {
+            speaker_id: 1,
+            language_id: 1,
+            pace: 1.0,
         }
+    }
+
+    pub fn with_speaker(mut self, speaker_id: i64) -> Self {
+        self.speaker_id = speaker_id;
+        self
+    }
+
+    pub fn with_language(mut self, language_id: i64) -> Self {
+        self.language_id = language_id;
+        self
+    }
+
+    pub fn with_pace(mut self, pace: f32) -> Self {
+        self.pace = pace;
+        self
     }
 }
 
-impl<'a> DivvunSpeech<'a> {
-    // pub unsafe fn from_memory_map(
-    //     voice: &Mmap,
-    //     vocoder: &Mmap,
-    //     symbol_set: SymbolSet<'a>,
-    //     device: Device,
-    // ) -> Result<Self, TchError> {
-    //     let device: tch::Device = device.into();
+impl Synthesizer {
+    /// Create a new TTS synthesizer with voice and vocoder models.
+    ///
+    /// The alphabet is automatically extracted from the voice model.
+    /// If the model doesn't have an embedded alphabet, returns `Error::NoAlphabet`.
+    ///
+    /// # Arguments
+    /// * `voice_path` - Path to the voice .pte model
+    /// * `vocoder_path` - Path to the vocoder .pte model
+    pub fn new<P: AsRef<Path>>(voice_path: P, vocoder_path: P) -> Result<Self, Error> {
+        let voice = CString::new(voice_path.as_ref().to_str().ok_or(Error::InvalidPath)?)
+            .map_err(|_| Error::InvalidPath)?;
 
-    //     let mut voice =
-    //         unsafe { tch::CModule::load_ptr_on_device(voice.as_ptr() as _, voice.len(), device) }?;
-    //     let mut vocoder = unsafe {
-    //         tch::CModule::load_ptr_on_device(vocoder.as_ptr() as _, vocoder.len(), device)
-    //     }?;
+        let vocoder = CString::new(vocoder_path.as_ref().to_str().ok_or(Error::InvalidPath)?)
+            .map_err(|_| Error::InvalidPath)?;
 
-    //     Ok(Self {
-    //         voice,
-    //         vocoder,
-    //         device,
-    //         text_processor: TextProcessor::new(symbol_set),
-    //     })
-    // }
+        let mut error = Error::Ok;
+        let ptr = unsafe { tts_synthesizer_new(voice.as_ptr(), vocoder.as_ptr(), &mut error) };
 
-    pub fn new(
-        voice_path: impl AsRef<Path>,
-        vocoder_path: impl AsRef<Path>,
-        symbol_set: SymbolSet<'a>,
-        device: Device,
-    ) -> Result<Self, TchError> {
-        let device: tch::Device = device.into();
+        if ptr.is_null() {
+            return Err(error);
+        }
 
-        tracing::debug!("Loading voice");
-        let mut voice = tch::CModule::load_on_device(voice_path, tch::Device::Cpu)?;
-        voice.to(device, Kind::Float, false);
+        // Extract alphabet from the model
+        let mut len = 0usize;
+        let mut alphabet_error = Error::Ok;
+        let alphabet_ptr = unsafe { tts_get_alphabet(ptr, &mut len, &mut alphabet_error) };
 
-        tracing::debug!("Loading vocoder");
-        let vocoder = tch::CModule::load_on_device(vocoder_path, tch::Device::Cpu)?;
+        if alphabet_ptr.is_null() {
+            unsafe { tts_synthesizer_free(ptr) };
+            return Err(alphabet_error);
+        }
+
+        // Parse JSON alphabet
+        let alphabet_bytes = unsafe { std::slice::from_raw_parts(alphabet_ptr as *const u8, len) };
+        let symbols: Vec<String> = serde_json::from_slice(alphabet_bytes).map_err(|_| {
+            unsafe {
+                tts_free_alphabet(alphabet_ptr);
+                tts_synthesizer_free(ptr);
+            }
+            Error::InvalidAlphabetJson
+        })?;
+        unsafe { tts_free_alphabet(alphabet_ptr) };
+
+        let symbol_set = SymbolSet::from_vec(symbols);
 
         Ok(Self {
-            voice,
-            vocoder,
-            device,
+            ptr,
             text_processor: TextProcessor::new(symbol_set),
         })
     }
 
-    fn process_voice(&self, input: Tensor, options: &Options) -> Result<Tensor, TchError> {
-        let speaker = Tensor::from(options.speaker);
-        let language = Tensor::from(options.language);
-        let pace = Tensor::from(options.pace);
-        tracing::debug!("Options: {:?}", options);
-
-        let result = self.voice.forward_is(&[
-            IValue::Tensor(input),
-            IValue::Tensor(speaker),
-            IValue::Tensor(language),
-            IValue::Tensor(pace),
-        ])?;
-        let voice_data: Tensor = match result {
-            IValue::Tuple(mut x) => x.remove(0).try_into().unwrap(),
-            _ => unreachable!(),
-        };
-        Ok(voice_data)
+    /// Synthesize text to audio samples.
+    ///
+    /// Returns f32 audio samples at 22050 Hz sample rate.
+    pub fn synthesize(&self, text: &str, options: &Options) -> Result<Vec<f32>, Error> {
+        let tokens = self.text_processor.encode_text(text);
+        self.synthesize_tokens(&tokens, options)
     }
 
-    fn process_vocoder(&self, mel: Tensor) -> Result<Tensor, TchError> {
-        let y_g_hat = match self.vocoder.forward_ts(&[mel]) {
-            Ok(v) => v.to_kind(Kind::Float).squeeze_dim(1),
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-        Ok(y_g_hat)
-    }
-
-    fn sharpen(&self, mel: tch::Tensor) -> Result<Tensor, TchError> {
-        let mel_np: ArrayD<f32> = (&mel.to_kind(Kind::Float)).try_into().unwrap();
-        let mut mel_np: Array2<f32> = mel_np.slice(s![0, .., ..]).to_owned(); // Assuming mel has a batch dimension at the start
-
-        let blurred_f: Array2<f32> = gaussian_filter(&mel_np, 1.0, 0, BorderMode::Reflect, 4);
-
-        let alpha = 0.2;
-        mel_np = &mel_np + alpha * (&mel_np - &blurred_f);
-
-        let blurred_f: Array2<f32> = gaussian_filter(&mel_np, 3.0, 0, BorderMode::Reflect, 4);
-        let alpha = 0.1;
-
-        let mut sharpened: Array2<f32> = &mel_np + alpha * (&mel_np - &blurred_f);
-
-        // Prepare a separate array for the adjustments
-        let mut adjustments = Array2::<f32>::zeros(sharpened.dim());
-
-        for i in 0..80 {
-            adjustments.slice_mut(s![i, ..]).assign(
-                &((&sharpened.slice(s![i, ..]) + (i as f32 - 40.0) * 0.01)
-                    - &sharpened.slice(s![i, ..])),
-            );
+    /// Synthesize pre-tokenized input to audio samples.
+    ///
+    /// Use this if you want to handle text encoding yourself.
+    pub fn synthesize_tokens(&self, tokens: &[i64], options: &Options) -> Result<Vec<f32>, Error> {
+        if tokens.is_empty() {
+            return Err(Error::EmptyInput);
         }
 
-        // Apply the adjustments to the sharpened array
-        sharpened = &sharpened + &adjustments;
-
-        let mut result = Tensor::try_from(sharpened).unwrap();
-        result = result.to_kind(Kind::Float).unsqueeze(0);
-        // tracing::debug!("{:?}", &result);
-        Ok(result)
-    }
-
-    pub fn generate_wav(y_g_hat: Tensor) -> Result<Vec<u8>, TchError> {
-        let audio = y_g_hat.squeeze() * 32768.0;
-        let audio = audio.to_kind(Kind::Int16);
-        let audio = Vec::<i16>::try_from(audio).unwrap();
-
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 22050,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
+        let mut sample_count = 0usize;
+        let mut error = Error::Ok;
+        let audio_ptr = unsafe {
+            tts_synthesize(
+                self.ptr,
+                tokens.as_ptr(),
+                tokens.len(),
+                options.speaker_id,
+                options.language_id,
+                options.pace,
+                &mut sample_count,
+                &mut error,
+            )
         };
 
-        let out = Vec::with_capacity(audio.len() / 2 + 1);
-        let mut out = std::io::Cursor::new(out);
-
-        let mut writer = hound::WavWriter::new(&mut out, spec).unwrap();
-        for sample in audio {
-            writer.write_sample(sample).unwrap();
+        if audio_ptr.is_null() {
+            return Err(error);
         }
 
-        drop(writer);
-        Ok(out.into_inner())
+        let audio = unsafe { std::slice::from_raw_parts(audio_ptr, sample_count).to_vec() };
+        unsafe { tts_free_audio(audio_ptr) };
+
+        Ok(audio)
     }
 
-    pub fn forward(&self, input: &str, options: Options) -> Result<Tensor, TchError> {
-        tracing::debug!("Forwarding");
-        let _guard = tch::no_grad_guard();
-
-        tracing::debug!("Text proc");
-        let input = self.text_processor.encode_text(input);
-        tracing::trace!("{:?}", input);
-        tracing::debug!("Input to device");
-        let input = tch::Tensor::from_slice2(&[&input]);
-        tracing::trace!("{:?}", input);
-
-        tracing::debug!("Proc voice");
-        let mel = self.process_voice(input, &options)?;
-        tracing::debug!("{:?}", mel.size());
-        tracing::debug!("Sharpen");
-        let mel = self.sharpen(mel.to_device(tch::Device::Cpu))?;
-        tracing::debug!("{:?}", mel.size());
-        tracing::debug!("vocode");
-        let y_g_hat = self.process_vocoder(mel)?;
-        tracing::debug!("{:?}", y_g_hat.size());
-
-        Ok(y_g_hat)
+    /// Get access to the text processor for manual encoding.
+    pub fn text_processor(&self) -> &TextProcessor {
+        &self.text_processor
     }
 }
 
-struct TextProcessor<'a> {
-    symbols: SymbolSet<'a>,
-    symbol_to_id: HashMap<String, i32>,
-    id_to_symbol: HashMap<i32, String>,
-}
-
-impl<'a> TextProcessor<'a> {
-    fn new(symbol_set: SymbolSet<'a>) -> Self {
-        let symbol_to_id = symbol_set
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.to_string(), i.try_into().unwrap()))
-            .collect::<HashMap<_, _>>();
-
-        let id_to_symbol = symbol_set
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (i.try_into().unwrap(), s.to_string()))
-            .collect::<HashMap<_, _>>();
-
-        TextProcessor {
-            symbols: symbol_set,
-            symbol_to_id,
-            id_to_symbol,
-        }
-    }
-
-    fn text_to_sequence(&self, text: &str) -> Vec<i32> {
-        let mut sequence = self.symbols_to_sequence(&text);
-        sequence
-    }
-
-    fn sequence_to_text(&self, sequence: Vec<i32>) -> String {
-        sequence
-            .iter()
-            .filter_map(|&symbol_id| self.id_to_symbol.get(&symbol_id).map(|x| &**x))
-            .collect::<Vec<&str>>()
-            .join("")
-    }
-
-    fn symbols_to_sequence(&self, symbols: &str) -> Vec<i32> {
-        symbols
-            .chars()
-            .filter_map(|c| self.symbol_to_id.get(&c.to_string()).cloned())
-            .collect()
-    }
-
-    fn encode_text(&self, text: &str) -> Vec<i32> {
-        let text = text.to_string();
-
-        let mut text_encoded = self.text_to_sequence(&text);
-
-        // Hack: add spaces at beginning and end
-        text_encoded.insert(0, 9);
-        text_encoded.push(9);
-
-        text_encoded
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SymbolSet<'a>(Cow<'a, [&'a str]>);
-
-impl<'a> SymbolSet<'a> {
-    pub const fn new(symbols: &'a [&'a str]) -> Self {
-        Self(Cow::Borrowed(symbols))
-    }
-}
-
-impl<'a> Deref for SymbolSet<'a> {
-    type Target = [&'a str];
-
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
-}
-
-pub const SMJ_EXPANDED: SymbolSet<'static> = SymbolSet::new(&[
-    "!", "'", "\"", ",", ".", ":", ";", "?", "-", " ", "A", "Á", "Æ", "Å", "Ä", "B", "C", "D", "E",
-    "F", "G", "H", "I", "J", "K", "L", "M", "N", "Ŋ", "Ń", "Ñ", "O", "Ø", "Ö", "P", "Q", "R", "S",
-    "T", "Ŧ", "U", "V", "W", "X", "Y", "Z", "a", "á", "æ", "å", "ä", "b", "c", "d", "e", "f", "g",
-    "h", "i", "j", "k", "l", "m", "n", "ŋ", "ń", "ñ", "o", "ø", "ö", "p", "q", "r", "s", "t", "u",
-    "v", "w", "x", "y", "z",
-]);
-
-pub const SME_EXPANDED: SymbolSet<'static> = SymbolSet::new(&[
-    "!", "'", "\"", ",", ".", ":", ";", "?", "-", " ", "A", "Á", "Æ", "Å", "Ä", "B", "C", "Č", "D",
-    "Đ", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "Ŋ", "O", "Ø", "Ö", "P", "Q", "R", "S",
-    "Š", "T", "Ŧ", "U", "V", "W", "X", "Y", "Z", "Ž", "a", "á", "æ", "å", "ä", "b", "c", "č", "d",
-    "đ", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "ŋ", "o", "ø", "ö", "p", "q", "r", "s",
-    "š", "t", "ŧ", "u", "v", "w", "x", "y", "z", "ž",
-]);
-
-pub const SMA_EXPANDED: SymbolSet<'static> = SymbolSet::new(&[
-    "!", "'", "\"", ",", ".", ":", ";", "?", "-", " ", "A", "Æ", "Å", "B", "C", "D", "E", "F", "G",
-    "H", "I", "Ï", "J", "K", "L", "M", "N", "O", "Ø", "Ö", "P", "Q", "R", "S", "T", "U", "V", "W",
-    "X", "Y", "Z", "a", "æ", "å", "b", "c", "d", "e", "f", "g", "h", "i", "ï", "j", "k", "l", "m",
-    "n", "o", "ø", "ö", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-]);
-
-pub const ALL_SAMI: SymbolSet<'static> = SymbolSet::new(&[
-    "!", "'", "\"", ",", ".", ":", ";", "?", "-", " ", "A", "Á", "Æ", "Å", "Ä", "B", "C", "Č", "D",
-    "Đ", "E", "F", "G", "H", "I", "Ï", "J", "K", "L", "M", "N", "Ŋ", "Ń", "Ñ", "O", "Ø", "Ö", "P",
-    "Q", "R", "S", "Š", "T", "Ŧ", "U", "V", "W", "X", "Y", "Z", "Ž", "a", "á", "æ", "å", "ä", "b",
-    "c", "č", "d", "đ", "e", "f", "g", "h", "i", "ï", "j", "k", "l", "m", "n", "ŋ", "ń", "ñ", "o",
-    "ø", "ö", "p", "q", "r", "s", "š", "t", "ŧ", "u", "v", "w", "x", "y", "z", "ž",
-]);
+/// Audio sample rate for synthesized audio (22050 Hz)
+pub const SAMPLE_RATE: u32 = 22050;
