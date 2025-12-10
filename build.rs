@@ -5,11 +5,16 @@ fn main() {
         .expect("EXECUTORCH_SYSROOT environment variable must be set");
     let executorch_sysroot = PathBuf::from(executorch_sysroot);
 
+    let executorch_src = std::env::var("EXECUTORCH_SRC")
+        .expect("EXECUTORCH_SRC environment variable must be set");
+    let executorch_src = PathBuf::from(executorch_src);
+
     // Build wrapper with cmake
     let dst = cmake::Config::new("wrapper")
         .define("CMAKE_BUILD_TYPE", "Release")
         .define("CMAKE_OSX_DEPLOYMENT_TARGET", "15.0")
         .env("EXECUTORCH_SYSROOT", &executorch_sysroot)
+        .env("EXECUTORCH_SRC", &executorch_src)
         .build();
 
     // Link paths
@@ -84,4 +89,5 @@ fn main() {
     // Rerun if wrapper source changes
     println!("cargo:rerun-if-changed=wrapper/");
     println!("cargo:rerun-if-env-changed=EXECUTORCH_SYSROOT");
+    println!("cargo:rerun-if-env-changed=EXECUTORCH_SRC");
 }

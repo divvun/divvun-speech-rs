@@ -81,6 +81,7 @@ pub struct Synthesizer {
 }
 
 unsafe impl Send for Synthesizer {}
+unsafe impl Sync for Synthesizer {}
 
 impl Drop for Synthesizer {
     fn drop(&mut self) {

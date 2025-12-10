@@ -9,14 +9,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# ExecuTorch paths from EXECUTORCH_SYSROOT environment variable
-set(EXECUTORCH_ROOT $ENV{EXECUTORCH_SYSROOT})
-if(NOT EXECUTORCH_ROOT)
-    message(FATAL_ERROR "EXECUTORCH_SYSROOT environment variable not set")
+# ExecuTorch paths from environment variables
+# EXECUTORCH_SRC: source tree (for includes)
+# EXECUTORCH_SYSROOT: install prefix (for linking, handled by build.rs)
+set(EXECUTORCH_SRC $ENV{EXECUTORCH_SRC})
+if(NOT EXECUTORCH_SRC)
+    message(FATAL_ERROR "EXECUTORCH_SRC environment variable not set")
 endif()
 
-set(EXECUTORCH_INCLUDE "${EXECUTORCH_ROOT}/include")
-set(EXECUTORCH_LIB "${EXECUTORCH_ROOT}/lib")
+set(EXECUTORCH_INCLUDE "${EXECUTORCH_SRC}")
 
 # Custom TTS ops (fused ISTFT for Vocos vocoder, LayerNorm for XNNPACK gaps)
 add_library(custom_ops STATIC
