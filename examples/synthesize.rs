@@ -7,19 +7,47 @@ use std::path::PathBuf;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 4 {
+    // Parse optional flags
+    let mut pace: f32 = 1.0;
+    let mut speaker: i64 = 1;
+    let mut language: i64 = 1;
+    let mut positional: Vec<&str> = Vec::new();
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--pace" => {
+                i += 1;
+                pace = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1.0);
+            }
+            "--speaker" => {
+                i += 1;
+                speaker = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1);
+            }
+            "--language" => {
+                i += 1;
+                language = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1);
+            }
+            arg => {
+                positional.push(arg);
+            }
+        }
+        i += 1;
+    }
+
+    if positional.len() < 3 {
         eprintln!(
-            "Usage: {} <voice.pte> <vocoder.pte> <text> [output.wav]",
+            "Usage: {} <voice.pte> <vocoder.pte> <text> [output.wav] [--pace <f32>] [--speaker <i64>] [--language <i64>]",
             args[0]
         );
         std::process::exit(1);
     }
 
-    let voice_path = PathBuf::from(&args[1]);
-    let vocoder_path = PathBuf::from(&args[2]);
-    let text = &args[3];
-    let output_path = args
-        .get(4)
+    let voice_path = PathBuf::from(positional[0]);
+    let vocoder_path = PathBuf::from(positional[1]);
+    let text = positional[2];
+    let output_path = positional
+        .get(3)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("output.wav"));
 
@@ -31,7 +59,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("Synthesizing: \"{}\"", text);
-    let options = Options::new().with_pace(1.05);
+    println!(
+        "Options: pace={}, speaker={}, language={}",
+        pace, speaker, language
+    );
+    let options = Options::new()
+        .with_pace(pace)
+        .with_speaker(speaker)
+        .with_language(language);
     let audio = synth.synthesize(text, &options)?;
 
     println!(
