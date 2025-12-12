@@ -2,9 +2,11 @@
 // Wraps ExecuTorch voice + vocoder inference
 
 #include "wrapper.hpp"
+#include "custom_ops/pffft.h"
 
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <vector>
 #include <algorithm>
 #include <memory>
@@ -18,6 +20,133 @@
 
 using namespace executorch::runtime;
 using namespace executorch::extension;
+
+// Find next valid FFT size (pffft needs N = 2^a * 3^b * 5^c, a >= 5)
+static int next_fft_size(int n) {
+    if (n < 32) return 32;
+    int candidate = 32;
+    while (candidate < n) {
+        candidate *= 2;
+    }
+    return candidate;
+}
+
+// 1D Gaussian blur using FFT convolution
+static void gaussian_blur_1d_fft(float* data, int len, float sigma,
+                                  PFFFT_Setup* setup, int fft_size,
+                                  float* work, float* freq_data, float* freq_kernel) {
+    // Build Gaussian kernel in time domain (centered, zero-padded)
+    std::vector<float> kernel(fft_size, 0.0f);
+    int radius = static_cast<int>(std::ceil(3.0f * sigma));
+    float sum = 0.0f;
+    for (int i = -radius; i <= radius; i++) {
+        float val = std::exp(-(i * i) / (2.0f * sigma * sigma));
+        kernel[(i + fft_size) % fft_size] = val;
+        sum += val;
+    }
+    for (int i = 0; i < fft_size; i++) kernel[i] /= sum;
+
+    // Copy data with zero-padding
+    std::vector<float> padded(fft_size, 0.0f);
+    for (int i = 0; i < len; i++) padded[i] = data[i];
+
+    // FFT of padded data
+    pffft_transform(setup, padded.data(), freq_data, work, PFFFT_FORWARD);
+
+    // FFT of kernel
+    pffft_transform(setup, kernel.data(), freq_kernel, work, PFFFT_FORWARD);
+
+    // Multiply in frequency domain
+    std::vector<float> freq_result(fft_size, 0.0f);
+    pffft_zconvolve_accumulate(setup, freq_data, freq_kernel, freq_result.data(), 1.0f);
+
+    // Inverse FFT
+    pffft_transform(setup, freq_result.data(), padded.data(), work, PFFFT_BACKWARD);
+
+    // Scale and copy back (pffft doesn't normalize)
+    float scale = 1.0f / fft_size;
+    for (int i = 0; i < len; i++) {
+        data[i] = padded[i] * scale;
+    }
+}
+
+// 2D Gaussian blur using separable FFT convolutions
+static void gaussian_blur_2d_fft(float* data, int height, int width, float sigma) {
+    // Setup FFT for rows
+    int row_fft_size = next_fft_size(width);
+    PFFFT_Setup* row_setup = pffft_new_setup(row_fft_size, PFFFT_REAL);
+
+    // Allocate aligned buffers
+    float* work = (float*)pffft_aligned_malloc(row_fft_size * sizeof(float));
+    float* freq_data = (float*)pffft_aligned_malloc(row_fft_size * sizeof(float));
+    float* freq_kernel = (float*)pffft_aligned_malloc(row_fft_size * sizeof(float));
+
+    // Blur rows
+    for (int y = 0; y < height; y++) {
+        gaussian_blur_1d_fft(&data[y * width], width, sigma,
+                            row_setup, row_fft_size, work, freq_data, freq_kernel);
+    }
+
+    pffft_destroy_setup(row_setup);
+
+    // Setup FFT for columns
+    int col_fft_size = next_fft_size(height);
+    PFFFT_Setup* col_setup = pffft_new_setup(col_fft_size, PFFFT_REAL);
+
+    // Resize buffers if needed
+    if (col_fft_size > row_fft_size) {
+        pffft_aligned_free(work);
+        pffft_aligned_free(freq_data);
+        pffft_aligned_free(freq_kernel);
+        work = (float*)pffft_aligned_malloc(col_fft_size * sizeof(float));
+        freq_data = (float*)pffft_aligned_malloc(col_fft_size * sizeof(float));
+        freq_kernel = (float*)pffft_aligned_malloc(col_fft_size * sizeof(float));
+    }
+
+    // Blur columns
+    std::vector<float> column(height);
+    for (int x = 0; x < width; x++) {
+        for (int y = 0; y < height; y++) column[y] = data[y * width + x];
+
+        gaussian_blur_1d_fft(column.data(), height, sigma,
+                            col_setup, col_fft_size, work, freq_data, freq_kernel);
+
+        for (int y = 0; y < height; y++) data[y * width + x] = column[y];
+    }
+
+    pffft_destroy_setup(col_setup);
+    pffft_aligned_free(work);
+    pffft_aligned_free(freq_data);
+    pffft_aligned_free(freq_kernel);
+}
+
+// Apply mel spectrogram sharpening (matches Python _process_sharpening)
+static void sharpen_mel(float* mel_data, int mel_channels, int mel_len) {
+    size_t size = static_cast<size_t>(mel_channels) * mel_len;
+    std::vector<float> blurred(size);
+
+    // Pass 1: Unsharp mask with sigma=1.0, alpha=0.2
+    std::memcpy(blurred.data(), mel_data, size * sizeof(float));
+    gaussian_blur_2d_fft(blurred.data(), mel_channels, mel_len, 1.0f);
+    for (size_t i = 0; i < size; i++) {
+        mel_data[i] = mel_data[i] + 0.2f * (mel_data[i] - blurred[i]);
+    }
+
+    // Pass 2: Unsharp mask with sigma=3.0, alpha=0.1
+    std::memcpy(blurred.data(), mel_data, size * sizeof(float));
+    gaussian_blur_2d_fft(blurred.data(), mel_channels, mel_len, 3.0f);
+    for (size_t i = 0; i < size; i++) {
+        mel_data[i] = mel_data[i] + 0.1f * (mel_data[i] - blurred[i]);
+    }
+
+    // Per-frequency adjustment: mel[i][j] += (i - 40) * 0.01
+    for (int i = 0; i < mel_channels; i++) {
+        float adjustment = (i - 40) * 0.01f;
+        for (int j = 0; j < mel_len; j++) {
+            mel_data[i * mel_len + j] += adjustment;
+        }
+    }
+}
 
 struct TtsSynthesizer {
     // Must be pointers - Program::load takes a pointer and keeps it
@@ -177,6 +306,14 @@ float* tts_synthesize(
         }
     }
 
+    // Sharpen mel spectrogram
+    int mel_channels = static_cast<int>(mel_tensor.size(1));
+    int mel_len = static_cast<int>(mel_tensor.size(2));
+    std::vector<float> mel_sharpened(mel_tensor.numel());
+    memcpy(mel_sharpened.data(), mel_tensor.const_data_ptr<float>(),
+           mel_tensor.numel() * sizeof(float));
+    sharpen_mel(mel_sharpened.data(), mel_channels, mel_len);
+
     // Memory for vocoder
     testing::ManagedMemoryManager vocoder_mmm(
         512 * 1024 * 1024,  // 512MB planned memory
@@ -190,7 +327,7 @@ float* tts_synthesize(
     }
     Method vocoder_method = std::move(vocoder_method_result.get());
 
-    // Set vocoder input
+    // Set vocoder input (using sharpened mel)
     EValue& input_evalue = vocoder_method.mutable_input(0);
     if (input_evalue.isTensor()) {
         // XNNPACK: copy data into pre-allocated tensor
@@ -200,21 +337,17 @@ float* tts_synthesize(
             return nullptr;
         }
         memcpy(input_tensor.mutable_data_ptr<float>(),
-               mel_tensor.const_data_ptr<float>(),
-               mel_tensor.numel() * sizeof(float));
+               mel_sharpened.data(),
+               mel_sharpened.size() * sizeof(float));
     } else {
         // Portable backend: use set_input
-        size_t mel_numel = mel_tensor.numel();
-        std::vector<float> mel_data(mel_numel);
-        memcpy(mel_data.data(), mel_tensor.const_data_ptr<float>(), mel_numel * sizeof(float));
-
         auto mel_for_vocoder = make_tensor_ptr<float>(
             std::vector<executorch::aten::SizesType>{
                 (int32_t)mel_tensor.size(0),
                 (int32_t)mel_tensor.size(1),
                 (int32_t)mel_tensor.size(2)
             },
-            std::move(mel_data)
+            std::move(mel_sharpened)
         );
 
         EValue mel_input(*mel_for_vocoder);
