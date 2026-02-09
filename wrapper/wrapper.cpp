@@ -257,47 +257,72 @@ float* tts_synthesize(
     }
     Method voice_method = std::move(voice_method_result.get());
 
-    // Create input tensors
-    std::vector<int64_t> text_tokens(tokens, tokens + token_count);
-    auto text_tensor = make_tensor_ptr<int64_t>(
-        std::vector<executorch::aten::SizesType>{1, (int32_t)token_count},
-        std::move(text_tokens)
-    );
+    // Set voice model inputs
+    // XNNPACK models use pre-allocated fixed-shape tensors (mutable_input),
+    // portable models use dynamic-shape tensors (set_input)
+    static const int32_t VOICE_MAX_SEQ_LEN = 512;
 
-    auto speaker_tensor = make_tensor_ptr<int64_t>(
-        std::vector<executorch::aten::SizesType>{1},
-        std::vector<int64_t>{speaker_id}
-    );
-
-    auto language_tensor = make_tensor_ptr<int64_t>(
-        std::vector<executorch::aten::SizesType>{1},
-        std::vector<int64_t>{language_id}
-    );
-
-    auto pace_tensor = make_tensor_ptr<float>(
-        std::vector<executorch::aten::SizesType>{1},
-        std::vector<float>{pace}
-    );
-
-    EValue inputs[] = {
-        EValue(*text_tensor),
-        EValue(*speaker_tensor),
-        EValue(*language_tensor),
-        EValue(*pace_tensor)
-    };
-
-    static const char* input_names[] = {
-        "failed to set text tensor",
-        "failed to set speaker tensor",
-        "failed to set language tensor",
-        "failed to set pace tensor"
-    };
-    for (size_t i = 0; i < 4; i++) {
-        auto err = voice_method.set_input(inputs[i], i);
-        if (err != Error::Ok) {
+    EValue& voice_input_0 = voice_method.mutable_input(0);
+    if (voice_input_0.isTensor()) {
+        // XNNPACK: pre-allocated tensor with fixed shape [1, 512]
+        auto& input_tensor = voice_input_0.toTensor();
+        if (token_count > VOICE_MAX_SEQ_LEN) {
             set_error(out_error, TTS_ERROR_VOICE_INPUT_FAILED, out_error_detail,
-                      input_names[i]);
+                      "token count exceeds max sequence length (512)");
             return nullptr;
+        }
+        // Zero-fill (token 0 = padding_idx, masked by the model), then copy actual tokens
+        int64_t* data = input_tensor.mutable_data_ptr<int64_t>();
+        memset(data, 0, VOICE_MAX_SEQ_LEN * sizeof(int64_t));
+        memcpy(data, tokens, token_count * sizeof(int64_t));
+
+        // Set other inputs via mutable_input
+        voice_method.mutable_input(1).toTensor().mutable_data_ptr<int64_t>()[0] = speaker_id;
+        voice_method.mutable_input(2).toTensor().mutable_data_ptr<int64_t>()[0] = language_id;
+        voice_method.mutable_input(3).toTensor().mutable_data_ptr<float>()[0] = pace;
+    } else {
+        // Portable backend: use set_input with actual token count
+        std::vector<int64_t> text_tokens(tokens, tokens + token_count);
+        auto text_tensor = make_tensor_ptr<int64_t>(
+            std::vector<executorch::aten::SizesType>{1, (int32_t)token_count},
+            std::move(text_tokens)
+        );
+
+        auto speaker_tensor = make_tensor_ptr<int64_t>(
+            std::vector<executorch::aten::SizesType>{1},
+            std::vector<int64_t>{speaker_id}
+        );
+
+        auto language_tensor = make_tensor_ptr<int64_t>(
+            std::vector<executorch::aten::SizesType>{1},
+            std::vector<int64_t>{language_id}
+        );
+
+        auto pace_tensor = make_tensor_ptr<float>(
+            std::vector<executorch::aten::SizesType>{1},
+            std::vector<float>{pace}
+        );
+
+        EValue inputs[] = {
+            EValue(*text_tensor),
+            EValue(*speaker_tensor),
+            EValue(*language_tensor),
+            EValue(*pace_tensor)
+        };
+
+        static const char* input_names[] = {
+            "failed to set text tensor",
+            "failed to set speaker tensor",
+            "failed to set language tensor",
+            "failed to set pace tensor"
+        };
+        for (size_t i = 0; i < 4; i++) {
+            auto err = voice_method.set_input(inputs[i], i);
+            if (err != Error::Ok) {
+                set_error(out_error, TTS_ERROR_VOICE_INPUT_FAILED, out_error_detail,
+                          input_names[i]);
+                return nullptr;
+            }
         }
     }
 
