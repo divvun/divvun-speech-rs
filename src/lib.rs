@@ -7,6 +7,34 @@ use std::path::Path;
 pub use symbols::*;
 pub use text::{SymbolSet, TextProcessor};
 
+/// Error with optional detail message from C layer.
+#[derive(Debug, Clone)]
+pub struct SynthesisError {
+    pub code: Error,
+    pub detail: Option<String>,
+}
+
+impl std::fmt::Display for SynthesisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.detail {
+            Some(detail) => write!(f, "{}: {}", self.code, detail),
+            None => write!(f, "{}", self.code),
+        }
+    }
+}
+
+impl std::error::Error for SynthesisError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.code)
+    }
+}
+
+impl From<Error> for SynthesisError {
+    fn from(code: Error) -> Self {
+        Self { code, detail: None }
+    }
+}
+
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -54,6 +82,7 @@ unsafe extern "C" {
         voice: *const i8,
         vocoder: *const i8,
         out_error: *mut Error,
+        out_error_detail: *mut *const i8,
     ) -> *mut std::ffi::c_void;
     fn tts_synthesizer_free(ptr: *mut std::ffi::c_void);
     fn tts_synthesize(
@@ -65,14 +94,34 @@ unsafe extern "C" {
         pace: f32,
         out_sample_count: *mut usize,
         out_error: *mut Error,
+        out_error_detail: *mut *const i8,
     ) -> *mut f32;
     fn tts_free_audio(audio: *mut f32);
     fn tts_get_alphabet(
         synth: *mut std::ffi::c_void,
         out_len: *mut usize,
         out_error: *mut Error,
+        out_error_detail: *mut *const i8,
     ) -> *const i8;
     fn tts_free_alphabet(data: *const i8);
+}
+
+/// Helper to capture error detail from C layer
+fn capture_error_detail(detail_ptr: *const i8) -> Option<String> {
+    if detail_ptr.is_null() {
+        None
+    } else {
+        // SAFETY: detail_ptr points to a static string in C
+        let cstr = unsafe { std::ffi::CStr::from_ptr(detail_ptr) };
+        Some(cstr.to_string_lossy().into_owned())
+    }
+}
+
+fn make_error(code: Error, detail_ptr: *const i8) -> SynthesisError {
+    SynthesisError {
+        code,
+        detail: capture_error_detail(detail_ptr),
+    }
 }
 
 pub struct Synthesizer {
@@ -130,7 +179,7 @@ impl Synthesizer {
     /// # Arguments
     /// * `voice_path` - Path to the voice .pte model
     /// * `vocoder_path` - Path to the vocoder .pte model
-    pub fn new<P: AsRef<Path>>(voice_path: P, vocoder_path: P) -> Result<Self, Error> {
+    pub fn new<P: AsRef<Path>>(voice_path: P, vocoder_path: P) -> Result<Self, SynthesisError> {
         let voice = CString::new(voice_path.as_ref().to_str().ok_or(Error::InvalidPath)?)
             .map_err(|_| Error::InvalidPath)?;
 
@@ -138,20 +187,26 @@ impl Synthesizer {
             .map_err(|_| Error::InvalidPath)?;
 
         let mut error = Error::Ok;
-        let ptr = unsafe { tts_synthesizer_new(voice.as_ptr(), vocoder.as_ptr(), &mut error) };
+        let mut error_detail: *const i8 = std::ptr::null();
+        let ptr = unsafe {
+            tts_synthesizer_new(voice.as_ptr(), vocoder.as_ptr(), &mut error, &mut error_detail)
+        };
 
         if ptr.is_null() {
-            return Err(error);
+            return Err(make_error(error, error_detail));
         }
 
         // Extract alphabet from the model
         let mut len = 0usize;
         let mut alphabet_error = Error::Ok;
-        let alphabet_ptr = unsafe { tts_get_alphabet(ptr, &mut len, &mut alphabet_error) };
+        let mut alphabet_error_detail: *const i8 = std::ptr::null();
+        let alphabet_ptr = unsafe {
+            tts_get_alphabet(ptr, &mut len, &mut alphabet_error, &mut alphabet_error_detail)
+        };
 
         if alphabet_ptr.is_null() {
             unsafe { tts_synthesizer_free(ptr) };
-            return Err(alphabet_error);
+            return Err(make_error(alphabet_error, alphabet_error_detail));
         }
 
         // Parse JSON alphabet
@@ -161,7 +216,7 @@ impl Synthesizer {
                 tts_free_alphabet(alphabet_ptr);
                 tts_synthesizer_free(ptr);
             }
-            Error::InvalidAlphabetJson
+            SynthesisError::from(Error::InvalidAlphabetJson)
         })?;
         unsafe { tts_free_alphabet(alphabet_ptr) };
 
@@ -176,7 +231,7 @@ impl Synthesizer {
     /// Synthesize text to audio samples.
     ///
     /// Returns f32 audio samples at 22050 Hz sample rate.
-    pub fn synthesize(&self, text: &str, options: &Options) -> Result<Vec<f32>, Error> {
+    pub fn synthesize(&self, text: &str, options: &Options) -> Result<Vec<f32>, SynthesisError> {
         let tokens = self.text_processor.encode_text(text);
         self.synthesize_tokens(&tokens, options)
     }
@@ -184,13 +239,18 @@ impl Synthesizer {
     /// Synthesize pre-tokenized input to audio samples.
     ///
     /// Use this if you want to handle text encoding yourself.
-    pub fn synthesize_tokens(&self, tokens: &[i64], options: &Options) -> Result<Vec<f32>, Error> {
+    pub fn synthesize_tokens(
+        &self,
+        tokens: &[i64],
+        options: &Options,
+    ) -> Result<Vec<f32>, SynthesisError> {
         if tokens.is_empty() {
-            return Err(Error::EmptyInput);
+            return Err(Error::EmptyInput.into());
         }
 
         let mut sample_count = 0usize;
         let mut error = Error::Ok;
+        let mut error_detail: *const i8 = std::ptr::null();
         let audio_ptr = unsafe {
             tts_synthesize(
                 self.ptr,
@@ -201,11 +261,12 @@ impl Synthesizer {
                 options.pace,
                 &mut sample_count,
                 &mut error,
+                &mut error_detail,
             )
         };
 
         if audio_ptr.is_null() {
-            return Err(error);
+            return Err(make_error(error, error_detail));
         }
 
         let audio = unsafe { std::slice::from_raw_parts(audio_ptr, sample_count).to_vec() };

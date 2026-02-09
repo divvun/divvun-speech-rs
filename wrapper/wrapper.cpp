@@ -156,8 +156,11 @@ struct TtsSynthesizer {
     std::unique_ptr<Program> vocoder_program;
 };
 
-static inline void set_error(TtsError* out_error, TtsError err) {
+static inline void set_error(TtsError* out_error, TtsError err,
+                             const char** out_detail = nullptr,
+                             const char* detail = nullptr) {
     if (out_error) *out_error = err;
+    if (out_detail) *out_detail = detail;
 }
 
 extern "C" {
@@ -165,12 +168,14 @@ extern "C" {
 TtsSynthesizer* tts_synthesizer_new(
     const char* voice_path,
     const char* vocoder_path,
-    TtsError* out_error
+    TtsError* out_error,
+    const char** out_error_detail
 ) {
-    set_error(out_error, TTS_OK);
+    set_error(out_error, TTS_OK, out_error_detail);
 
     if (!voice_path || !vocoder_path) {
-        set_error(out_error, TTS_ERROR_INVALID_ARGUMENT);
+        set_error(out_error, TTS_ERROR_INVALID_ARGUMENT, out_error_detail,
+                  "voice_path or vocoder_path is null");
         return nullptr;
     }
 
@@ -179,14 +184,16 @@ TtsSynthesizer* tts_synthesizer_new(
     // Load voice model with mmap
     auto voice_loader_result = MmapDataLoader::from(voice_path, MmapDataLoader::MlockConfig::UseMlockIgnoreErrors);
     if (!voice_loader_result.ok()) {
-        set_error(out_error, TTS_ERROR_VOICE_LOAD_FAILED);
+        set_error(out_error, TTS_ERROR_VOICE_LOAD_FAILED, out_error_detail,
+                  "failed to mmap voice model");
         return nullptr;
     }
     synth->voice_loader = std::make_unique<MmapDataLoader>(std::move(voice_loader_result.get()));
 
     auto voice_program_result = Program::load(synth->voice_loader.get());
     if (!voice_program_result.ok()) {
-        set_error(out_error, TTS_ERROR_VOICE_LOAD_FAILED);
+        set_error(out_error, TTS_ERROR_VOICE_LOAD_FAILED, out_error_detail,
+                  "failed to load voice program");
         return nullptr;
     }
     synth->voice_program = std::make_unique<Program>(std::move(voice_program_result.get()));
@@ -194,14 +201,16 @@ TtsSynthesizer* tts_synthesizer_new(
     // Load vocoder model with mmap
     auto vocoder_loader_result = MmapDataLoader::from(vocoder_path, MmapDataLoader::MlockConfig::UseMlockIgnoreErrors);
     if (!vocoder_loader_result.ok()) {
-        set_error(out_error, TTS_ERROR_VOCODER_LOAD_FAILED);
+        set_error(out_error, TTS_ERROR_VOCODER_LOAD_FAILED, out_error_detail,
+                  "failed to mmap vocoder model");
         return nullptr;
     }
     synth->vocoder_loader = std::make_unique<MmapDataLoader>(std::move(vocoder_loader_result.get()));
 
     auto vocoder_program_result = Program::load(synth->vocoder_loader.get());
     if (!vocoder_program_result.ok()) {
-        set_error(out_error, TTS_ERROR_VOCODER_LOAD_FAILED);
+        set_error(out_error, TTS_ERROR_VOCODER_LOAD_FAILED, out_error_detail,
+                  "failed to load vocoder program");
         return nullptr;
     }
     synth->vocoder_program = std::make_unique<Program>(std::move(vocoder_program_result.get()));
@@ -221,12 +230,14 @@ float* tts_synthesize(
     int64_t language_id,
     float pace,
     size_t* out_sample_count,
-    TtsError* out_error
+    TtsError* out_error,
+    const char** out_error_detail
 ) {
-    set_error(out_error, TTS_OK);
+    set_error(out_error, TTS_OK, out_error_detail);
 
     if (!synth || !tokens || token_count == 0 || !out_sample_count) {
-        set_error(out_error, TTS_ERROR_INVALID_ARGUMENT);
+        set_error(out_error, TTS_ERROR_INVALID_ARGUMENT, out_error_detail,
+                  "synth, tokens, or out_sample_count is null");
         return nullptr;
     }
 
@@ -240,7 +251,8 @@ float* tts_synthesize(
 
     auto voice_method_result = synth->voice_program->load_method("forward", &voice_mmm.get());
     if (!voice_method_result.ok()) {
-        set_error(out_error, TTS_ERROR_VOICE_METHOD_LOAD_FAILED);
+        set_error(out_error, TTS_ERROR_VOICE_METHOD_LOAD_FAILED, out_error_detail,
+                  "failed to load 'forward' method from voice");
         return nullptr;
     }
     Method voice_method = std::move(voice_method_result.get());
@@ -274,10 +286,17 @@ float* tts_synthesize(
         EValue(*pace_tensor)
     };
 
+    static const char* input_names[] = {
+        "failed to set text tensor",
+        "failed to set speaker tensor",
+        "failed to set language tensor",
+        "failed to set pace tensor"
+    };
     for (size_t i = 0; i < 4; i++) {
         auto err = voice_method.set_input(inputs[i], i);
         if (err != Error::Ok) {
-            set_error(out_error, TTS_ERROR_VOICE_INPUT_FAILED);
+            set_error(out_error, TTS_ERROR_VOICE_INPUT_FAILED, out_error_detail,
+                      input_names[i]);
             return nullptr;
         }
     }
@@ -285,14 +304,16 @@ float* tts_synthesize(
     // Run voice model
     auto voice_err = voice_method.execute();
     if (voice_err != Error::Ok) {
-        set_error(out_error, TTS_ERROR_VOICE_EXECUTE_FAILED);
+        set_error(out_error, TTS_ERROR_VOICE_EXECUTE_FAILED, out_error_detail,
+                  "voice model execution failed");
         return nullptr;
     }
 
     // Get mel spectrogram output
     const EValue& mel_output = voice_method.get_output(0);
     if (!mel_output.isTensor()) {
-        set_error(out_error, TTS_ERROR_VOICE_OUTPUT_INVALID);
+        set_error(out_error, TTS_ERROR_VOICE_OUTPUT_INVALID, out_error_detail,
+                  "voice output is not a tensor");
         return nullptr;
     }
     const auto& mel_tensor = mel_output.toTensor();
@@ -322,7 +343,8 @@ float* tts_synthesize(
 
     auto vocoder_method_result = synth->vocoder_program->load_method("forward", &vocoder_mmm.get());
     if (!vocoder_method_result.ok()) {
-        set_error(out_error, TTS_ERROR_VOCODER_METHOD_LOAD_FAILED);
+        set_error(out_error, TTS_ERROR_VOCODER_METHOD_LOAD_FAILED, out_error_detail,
+                  "failed to load 'forward' method from vocoder");
         return nullptr;
     }
     Method vocoder_method = std::move(vocoder_method_result.get());
@@ -333,7 +355,8 @@ float* tts_synthesize(
         // XNNPACK: copy data into pre-allocated tensor
         auto& input_tensor = input_evalue.toTensor();
         if (input_tensor.numel() != mel_tensor.numel()) {
-            set_error(out_error, TTS_ERROR_SHAPE_MISMATCH);
+            set_error(out_error, TTS_ERROR_SHAPE_MISMATCH, out_error_detail,
+                      "mel tensor size mismatch with vocoder input");
             return nullptr;
         }
         memcpy(input_tensor.mutable_data_ptr<float>(),
@@ -353,7 +376,8 @@ float* tts_synthesize(
         EValue mel_input(*mel_for_vocoder);
         auto err = vocoder_method.set_input(mel_input, 0);
         if (err != Error::Ok) {
-            set_error(out_error, TTS_ERROR_VOCODER_INPUT_FAILED);
+            set_error(out_error, TTS_ERROR_VOCODER_INPUT_FAILED, out_error_detail,
+                      "failed to set vocoder mel input");
             return nullptr;
         }
     }
@@ -361,14 +385,16 @@ float* tts_synthesize(
     // Run vocoder
     auto vocoder_err = vocoder_method.execute();
     if (vocoder_err != Error::Ok) {
-        set_error(out_error, TTS_ERROR_VOCODER_EXECUTE_FAILED);
+        set_error(out_error, TTS_ERROR_VOCODER_EXECUTE_FAILED, out_error_detail,
+                  "vocoder execution failed");
         return nullptr;
     }
 
     // Get audio output
     const EValue& audio_output = vocoder_method.get_output(0);
     if (!audio_output.isTensor()) {
-        set_error(out_error, TTS_ERROR_VOCODER_OUTPUT_INVALID);
+        set_error(out_error, TTS_ERROR_VOCODER_OUTPUT_INVALID, out_error_detail,
+                  "vocoder output is not a tensor");
         return nullptr;
     }
     const auto& audio_tensor = audio_output.toTensor();
@@ -394,12 +420,14 @@ void tts_free_audio(float* audio) {
 const char* tts_get_alphabet(
     TtsSynthesizer* synth,
     size_t* out_len,
-    TtsError* out_error
+    TtsError* out_error,
+    const char** out_error_detail
 ) {
-    set_error(out_error, TTS_OK);
+    set_error(out_error, TTS_OK, out_error_detail);
 
     if (!synth || !out_len) {
-        set_error(out_error, TTS_ERROR_INVALID_ARGUMENT);
+        set_error(out_error, TTS_ERROR_INVALID_ARGUMENT, out_error_detail,
+                  "synth or out_len is null");
         return nullptr;
     }
 
@@ -408,20 +436,23 @@ const char* tts_get_alphabet(
     // Get the named data map from the voice program
     auto named_data_map_result = synth->voice_program->get_named_data_map();
     if (!named_data_map_result.ok()) {
-        set_error(out_error, TTS_ERROR_NO_ALPHABET);
+        set_error(out_error, TTS_ERROR_NO_ALPHABET, out_error_detail,
+                  "failed to get named data map from voice program");
         return nullptr;
     }
 
     const auto* named_data_map = named_data_map_result.get();
     if (!named_data_map) {
-        set_error(out_error, TTS_ERROR_NO_ALPHABET);
+        set_error(out_error, TTS_ERROR_NO_ALPHABET, out_error_detail,
+                  "named data map is null");
         return nullptr;
     }
 
     // Get the alphabet data
     auto alphabet_result = named_data_map->get_data("alphabet");
     if (!alphabet_result.ok()) {
-        set_error(out_error, TTS_ERROR_NO_ALPHABET);
+        set_error(out_error, TTS_ERROR_NO_ALPHABET, out_error_detail,
+                  "no 'alphabet' entry in named data map");
         return nullptr;
     }
 
