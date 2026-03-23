@@ -6,12 +6,20 @@ fn main() {
     let executorch_sysroot = PathBuf::from(executorch_sysroot);
 
     // Build wrapper with cmake
-    let dst = cmake::Config::new("wrapper")
+    let mut cmake_cfg = cmake::Config::new("wrapper");
+    cmake_cfg
         .define("CMAKE_BUILD_TYPE", "Release")
         .define("CMAKE_OSX_DEPLOYMENT_TARGET", "15.0")
         .env("EXECUTORCH_SYSROOT", &executorch_sysroot)
-        .env("EXECUTORCH_SRC", executorch_sysroot.join("include"))
-        .build();
+        .env("EXECUTORCH_SRC", executorch_sysroot.join("include"));
+
+    #[cfg(windows)]
+    {
+        cmake_cfg.static_crt(true);
+        cmake_cfg.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreaded");
+    }
+
+    let dst = cmake_cfg.build();
 
     // Link paths
     println!(
@@ -33,7 +41,8 @@ fn main() {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(ext) = path.extension() {
-                if ext == "a" {
+                let is_static_lib = ext == "a" || ext == "lib";
+                if is_static_lib {
                     if let Some(stem) = path.file_stem() {
                         let name = stem.to_string_lossy();
                         // Skip duplicates and problematic libs

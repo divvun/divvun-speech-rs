@@ -173,7 +173,11 @@ static executorch::runtime::Kernel custom_kernels[] = {
         layer_norm_wrapper),
 };
 
+#if defined(__GNUC__) || defined(__clang__)
 static auto register_kernels __attribute__((used)) =
+#else
+static auto register_kernels =
+#endif
     executorch::runtime::register_kernels({
         custom_kernels,
         sizeof(custom_kernels) / sizeof(custom_kernels[0])

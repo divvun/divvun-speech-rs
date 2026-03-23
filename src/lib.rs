@@ -189,7 +189,12 @@ impl Synthesizer {
         let mut error = Error::Ok;
         let mut error_detail: *const i8 = std::ptr::null();
         let ptr = unsafe {
-            tts_synthesizer_new(voice.as_ptr(), vocoder.as_ptr(), &mut error, &mut error_detail)
+            tts_synthesizer_new(
+                voice.as_ptr(),
+                vocoder.as_ptr(),
+                &mut error,
+                &mut error_detail,
+            )
         };
 
         if ptr.is_null() {
@@ -201,7 +206,12 @@ impl Synthesizer {
         let mut alphabet_error = Error::Ok;
         let mut alphabet_error_detail: *const i8 = std::ptr::null();
         let alphabet_ptr = unsafe {
-            tts_get_alphabet(ptr, &mut len, &mut alphabet_error, &mut alphabet_error_detail)
+            tts_get_alphabet(
+                ptr,
+                &mut len,
+                &mut alphabet_error,
+                &mut alphabet_error_detail,
+            )
         };
 
         if alphabet_ptr.is_null() {
