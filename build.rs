@@ -45,36 +45,26 @@ fn main() {
                 if is_static_lib {
                     if let Some(stem) = path.file_stem() {
                         let name = stem.to_string_lossy();
-                        // Skip duplicates and problematic libs
+                        // Skip duplicates and problematic libs.
+                        //
+                        // Kernel impls live in *_kernels archives; the
+                        // EXECUTORCH_LIBRARY()-generated static-init
+                        // registration code lives in *_ops_lib archives.
+                        // Without a registration archive, method loading
+                        // fails with Error::OperatorMissing. We link
+                        // optimized_native_cpu_ops_lib (which registers
+                        // the merged optimized+portable kernel set) and
+                        // skip every other *_ops_lib to avoid duplicate
+                        // registrations. portable_kernels is skipped
+                        // because optimized_portable_kernels supersedes it.
                         let lib_name_check = name.strip_prefix("lib").unwrap_or(&name);
-                        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-
-                        let is_windows = target_os == "windows";
-
-                        // On non-Windows, weak symbol registration in kernel
-                        // libs handles op registration; skip all ops_lib files.
-                        // On Windows, weak symbols don't work. We link ONLY
-                        // optimized_native_cpu_ops_lib which registers the
-                        // optimized+portable kernel set. Skip all other
-                        // ops_lib variants to avoid duplicate registrations.
-                        let skip = if is_windows {
-                            // Keep: optimized_native_cpu_ops_lib, optimized_portable_kernels, quantized_kernels
-                            // Skip: portable_kernels (subset of optimized_portable),
-                            //        all other ops_lib (duplicate registrations)
-                            name.contains("_static")
-                                || lib_name_check.contains("kernels_util_all_deps")
-                                || lib_name_check == "portable_kernels"
-                                || lib_name_check == "portable_ops_lib"
-                                || lib_name_check == "optimized_ops_lib"
-                                || lib_name_check == "optimized_portable_ops_lib"
-                                || lib_name_check == "quantized_ops_lib"
-                        } else {
-                            name.contains("_static")
-                                || lib_name_check.contains("kernels_util_all_deps")
-                                || lib_name_check.contains("ops_lib")
-                                || lib_name_check.contains("optimized_portable")
-                                || lib_name_check.contains("quantized_kernels")
-                        };
+                        let skip = name.contains("_static")
+                            || lib_name_check.contains("kernels_util_all_deps")
+                            || lib_name_check == "portable_kernels"
+                            || lib_name_check == "portable_ops_lib"
+                            || lib_name_check == "optimized_ops_lib"
+                            || lib_name_check == "optimized_portable_ops_lib"
+                            || lib_name_check == "quantized_ops_lib";
 
                         if skip {
                             continue;
