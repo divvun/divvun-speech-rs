@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <string>
 
 #include <executorch/extension/data_loader/mmap_data_loader.h>
 #include <executorch/runtime/executor/program.h>
@@ -20,6 +21,17 @@
 
 using namespace executorch::runtime;
 using namespace executorch::extension;
+
+// Forward-declare backend query functions (from runtime/backend/interface.h)
+// Using the same pattern as executorch's own pybindings.cpp
+namespace executorch {
+namespace runtime {
+class BackendInterface;
+size_t get_num_registered_backends();
+Result<const char*> get_backend_name(size_t index);
+BackendInterface* get_backend_class(const char* name);
+} // namespace runtime
+} // namespace executorch
 
 // Find next valid FFT size (pffft needs N = 2^a * 3^b * 5^c, a >= 5)
 static int next_fft_size(int n) {
@@ -165,12 +177,31 @@ static inline void set_error(TtsError* out_error, TtsError err,
 
 extern "C" {
 
+// Defined in custom_ops/register_ops.cpp
+extern "C" void tts_register_custom_ops();
+
+extern "C" size_t tts_get_num_backends() {
+    return executorch::runtime::get_num_registered_backends();
+}
+
+extern "C" const char* tts_get_backend_name(size_t index) {
+    auto result = executorch::runtime::get_backend_name(index);
+    return result.ok() ? result.get() : nullptr;
+}
+
+extern "C" bool tts_has_backend(const char* name) {
+    return executorch::runtime::get_backend_class(name) != nullptr;
+}
+
 TtsSynthesizer* tts_synthesizer_new(
     const char* voice_path,
     const char* vocoder_path,
     TtsError* out_error,
     const char** out_error_detail
 ) {
+    // Ensure custom ops are registered (static initializer may not run on MSVC)
+    tts_register_custom_ops();
+
     set_error(out_error, TTS_OK, out_error_detail);
 
     if (!voice_path || !vocoder_path) {
@@ -251,58 +282,41 @@ float* tts_synthesize(
 
     auto voice_method_result = synth->voice_program->load_method("forward", &voice_mmm.get());
     if (!voice_method_result.ok()) {
+        std::string detail = "failed to load 'forward' method from voice (";
+        detail += executorch::runtime::to_string(voice_method_result.error());
+        detail += ")";
         set_error(out_error, TTS_ERROR_VOICE_METHOD_LOAD_FAILED, out_error_detail,
-                  "failed to load 'forward' method from voice");
+                  strdup(detail.c_str()));
         return nullptr;
     }
     Method voice_method = std::move(voice_method_result.get());
 
-    // Set voice model inputs using set_input with actual token count.
-    // Works for both portable and XNNPACK backends — XNNPACK's runtime
-    // handles reshape via xnn_reshape_external_value() internally.
-    {
-        std::vector<int64_t> text_tokens(tokens, tokens + token_count);
-        auto text_tensor = make_tensor_ptr<int64_t>(
-            std::vector<executorch::aten::SizesType>{1, (int32_t)token_count},
-            std::move(text_tokens)
-        );
+    // Set voice model inputs via mutable_input() — writes directly into the
+    // model's pre-allocated tensors. The XNNPACK model has static input shape
+    // [1, 512], so we zero-fill and copy actual tokens in.
+    static const int32_t VOICE_MAX_SEQ_LEN = 512;
 
-        auto speaker_tensor = make_tensor_ptr<int64_t>(
-            std::vector<executorch::aten::SizesType>{1},
-            std::vector<int64_t>{speaker_id}
-        );
-
-        auto language_tensor = make_tensor_ptr<int64_t>(
-            std::vector<executorch::aten::SizesType>{1},
-            std::vector<int64_t>{language_id}
-        );
-
-        auto pace_tensor = make_tensor_ptr<float>(
-            std::vector<executorch::aten::SizesType>{1},
-            std::vector<float>{pace}
-        );
-
-        EValue inputs[] = {
-            EValue(*text_tensor),
-            EValue(*speaker_tensor),
-            EValue(*language_tensor),
-            EValue(*pace_tensor)
-        };
-
-        static const char* input_names[] = {
-            "failed to set text tensor",
-            "failed to set speaker tensor",
-            "failed to set language tensor",
-            "failed to set pace tensor"
-        };
-        for (size_t i = 0; i < 4; i++) {
-            auto err = voice_method.set_input(inputs[i], i);
-            if (err != Error::Ok) {
-                set_error(out_error, TTS_ERROR_VOICE_INPUT_FAILED, out_error_detail,
-                          input_names[i]);
-                return nullptr;
-            }
+    EValue& voice_input_0 = voice_method.mutable_input(0);
+    if (voice_input_0.isTensor()) {
+        auto& input_tensor = voice_input_0.toTensor();
+        if (token_count > VOICE_MAX_SEQ_LEN) {
+            set_error(out_error, TTS_ERROR_VOICE_INPUT_FAILED, out_error_detail,
+                      "token count exceeds max sequence length (512)");
+            return nullptr;
         }
+        // Zero-fill (token 0 = padding_idx, masked by the model), then copy actual tokens
+        int64_t* data = input_tensor.mutable_data_ptr<int64_t>();
+        memset(data, 0, VOICE_MAX_SEQ_LEN * sizeof(int64_t));
+        memcpy(data, tokens, token_count * sizeof(int64_t));
+
+        // Set other inputs via mutable_input
+        voice_method.mutable_input(1).toTensor().mutable_data_ptr<int64_t>()[0] = speaker_id;
+        voice_method.mutable_input(2).toTensor().mutable_data_ptr<int64_t>()[0] = language_id;
+        voice_method.mutable_input(3).toTensor().mutable_data_ptr<float>()[0] = pace;
+    } else {
+        set_error(out_error, TTS_ERROR_VOICE_INPUT_FAILED, out_error_detail,
+                  "failed to set text tensor");
+        return nullptr;
     }
 
     // Run voice model
@@ -347,8 +361,11 @@ float* tts_synthesize(
 
     auto vocoder_method_result = synth->vocoder_program->load_method("forward", &vocoder_mmm.get());
     if (!vocoder_method_result.ok()) {
+        std::string detail = "failed to load 'forward' method from vocoder (";
+        detail += executorch::runtime::to_string(vocoder_method_result.error());
+        detail += ")";
         set_error(out_error, TTS_ERROR_VOCODER_METHOD_LOAD_FAILED, out_error_detail,
-                  "failed to load 'forward' method from vocoder");
+                  strdup(detail.c_str()));
         return nullptr;
     }
     Method vocoder_method = std::move(vocoder_method_result.get());

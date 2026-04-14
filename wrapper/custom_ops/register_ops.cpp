@@ -184,3 +184,11 @@ static auto register_kernels =
     });
 
 } // namespace
+
+// Explicit registration function for platforms where static initializers
+// may not run reliably (e.g. MSVC with static libraries).
+extern "C" void tts_register_custom_ops() {
+    // Force a reference to register_kernels so its initializer runs.
+    // On MSVC, the static initializer may not execute without this reference.
+    (void)register_kernels;
+}

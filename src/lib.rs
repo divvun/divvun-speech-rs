@@ -104,6 +104,9 @@ unsafe extern "C" {
         out_error_detail: *mut *const i8,
     ) -> *const i8;
     fn tts_free_alphabet(data: *const i8);
+    fn tts_get_num_backends() -> usize;
+    fn tts_get_backend_name(index: usize) -> *const i8;
+    fn tts_has_backend(name: *const i8) -> bool;
 }
 
 /// Helper to capture error detail from C layer
@@ -199,6 +202,23 @@ impl Synthesizer {
 
         if ptr.is_null() {
             return Err(make_error(error, error_detail));
+        }
+
+        // Log registered backends for diagnostics
+        unsafe {
+            let num = tts_get_num_backends();
+            tracing::info!("executorch: {num} backends registered");
+            for i in 0..num {
+                let name = tts_get_backend_name(i);
+                if !name.is_null() {
+                    let name = std::ffi::CStr::from_ptr(name).to_string_lossy();
+                    tracing::info!("executorch: backend[{i}] = {name}");
+                }
+            }
+            tracing::info!(
+                "executorch: XnnpackBackend = {}",
+                tts_has_backend(c"XnnpackBackend".as_ptr().cast())
+            );
         }
 
         // Extract alphabet from the model
