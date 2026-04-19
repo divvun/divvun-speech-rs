@@ -338,12 +338,25 @@ float* tts_synthesize(
 
     // Get actual mel length for trimming (if available)
     int64_t actual_mel_len = mel_tensor.size(2);
+    int64_t mel_full_len = mel_tensor.size(2);
+    bool mel_len_from_model = false;
     if (voice_method.outputs_size() > 1) {
         const EValue& mel_lens_output = voice_method.get_output(1);
         if (mel_lens_output.isTensor()) {
             actual_mel_len = mel_lens_output.toTensor().const_data_ptr<int64_t>()[0];
+            mel_len_from_model = true;
         }
     }
+    fprintf(stderr,
+        "[tts-diag] tokens_in=%zu  voice_outputs=%zu  mel_full_len=%lld  "
+        "actual_mel_len=%lld  from_model=%d  mel_channels=%lld\n",
+        token_count,
+        (size_t)voice_method.outputs_size(),
+        (long long)mel_full_len,
+        (long long)actual_mel_len,
+        (int)mel_len_from_model,
+        (long long)mel_tensor.size(1));
+    fflush(stderr);
 
     // Sharpen mel spectrogram
     int mel_channels = static_cast<int>(mel_tensor.size(1));

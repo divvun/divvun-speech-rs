@@ -302,6 +302,14 @@ impl Synthesizer {
         let audio = unsafe { std::slice::from_raw_parts(audio_ptr, sample_count).to_vec() };
         unsafe { tts_free_audio(audio_ptr) };
 
+        tracing::info!(
+            "TTS synthesize: tokens={}, samples={} ({:.3}s @ {} Hz)",
+            tokens.len(),
+            sample_count,
+            sample_count as f32 / SAMPLE_RATE as f32,
+            SAMPLE_RATE
+        );
+
         Ok(audio)
     }
 
