@@ -103,20 +103,13 @@ impl TextProcessor {
 
     pub fn encode_text(&self, text: &str) -> Vec<i64> {
         let input_chars: Vec<char> = text.chars().collect();
-        let mut text_encoded = self.text_to_sequence(text);
+        let text_encoded = self.text_to_sequence(text);
 
-        // Identify silently-dropped chars for diagnostics
         let dropped: Vec<char> = input_chars
             .iter()
             .copied()
             .filter(|c| !self.symbol_to_id.contains_key(&c.to_string()))
             .collect();
-
-        // Add space tokens at beginning and end
-        // Space is typically at index 9 in the symbol sets
-        let space_id = self.symbol_to_id.get(" ").copied().unwrap_or(9);
-        text_encoded.insert(0, space_id);
-        text_encoded.push(space_id);
 
         tracing::info!(
             "TTS encode: input_chars={}, encoded_tokens={}, dropped_chars={} ({:?}), first_16_tokens={:?}",
@@ -144,8 +137,6 @@ mod tests {
     fn test_encode_text() {
         let processor = TextProcessor::new(ALL_SAMI);
         let tokens = processor.encode_text("Buorre beaivi");
-        assert!(!tokens.is_empty());
-        // First and last should be space tokens
-        assert_eq!(tokens[0], tokens[tokens.len() - 1]);
+        assert_eq!(tokens.len(), "Buorre beaivi".chars().count());
     }
 }

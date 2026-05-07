@@ -433,15 +433,23 @@ float* tts_synthesize(
     }
     const auto& audio_tensor = audio_output.toTensor();
 
-    // Calculate actual audio length (hop_length = 256 for Vocos)
+    // The vocoder's ISTFT runs with center=True, so the raw OLA buffer
+    // begins with n_fft/2 samples of synthesis padding (zeroed by the
+    // kernel's cold_trim) before the real signal. Skip past that to
+    // align with what torch.istft(center=True) would return.
     const int HOP_LENGTH = 256;
+    const int N_FFT_HALF = 512;  // n_fft = 1024 for Vocos
     size_t actual_audio_len = static_cast<size_t>(actual_mel_len) * HOP_LENGTH;
     size_t total_audio_len = audio_tensor.numel();
-    size_t num_samples = std::min(actual_audio_len, total_audio_len);
+    size_t offset = (total_audio_len > static_cast<size_t>(N_FFT_HALF)) ? N_FFT_HALF : 0;
+    size_t available = total_audio_len - offset;
+    size_t num_samples = std::min(actual_audio_len, available);
 
     // Copy audio to output buffer
     float* audio = new float[num_samples];
-    memcpy(audio, audio_tensor.const_data_ptr<float>(), num_samples * sizeof(float));
+    memcpy(audio,
+           audio_tensor.const_data_ptr<float>() + offset,
+           num_samples * sizeof(float));
 
     *out_sample_count = num_samples;
     return audio;
