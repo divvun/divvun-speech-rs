@@ -451,6 +451,23 @@ float* tts_synthesize(
            audio_tensor.const_data_ptr<float>() + offset,
            num_samples * sizeof(float));
 
+    // The last ~30 samples ramp into a DC offset of ~3% of peak — an
+    // OLA artifact at the boundary where the model's mel output
+    // transitions from real frames to padding frames. Without a fade,
+    // the WAV ending snaps that DC offset to silence and produces an
+    // audible click. Raised-cosine taper over the last FADE_LEN samples.
+    constexpr size_t FADE_LEN = 256;  // ~11.6 ms @ 22050 Hz
+    if (num_samples > FADE_LEN) {
+        const size_t fade_start = num_samples - FADE_LEN;
+        const float pi = 3.14159265358979323846f;
+        for (size_t i = fade_start; i < num_samples; ++i) {
+            float p = static_cast<float>(i - fade_start) /
+                      static_cast<float>(FADE_LEN);
+            float gain = 0.5f * (1.0f + std::cos(pi * p));
+            audio[i] *= gain;
+        }
+    }
+
     *out_sample_count = num_samples;
     return audio;
 }
