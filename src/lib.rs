@@ -46,7 +46,7 @@ pub enum Error {
     #[error("Empty input")]
     EmptyInput = -1,
 
-    // C API errors (match wrapper.hpp TtsError enum)
+    // Non-negative status/error codes (formerly the C TtsError enum).
     #[error("Success")]
     Ok = 0,
     #[error("Invalid argument")]

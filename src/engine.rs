@@ -1,10 +1,10 @@
-//! Native synthesis engine backed by the Rust ExecuTorch port.
+//! Native synthesis engine backed by the Rust ExecuTorch port
+//! (github.com/divvun/executorch-rs).
 //!
-//! This replaces the old C++ `wrapper/` (see `synthesize_impl` in
-//! `wrapper.cpp`): it loads the voice + vocoder `.pte` models via the port's
-//! `Module` API, registers our custom ops (`tts::istft.out`,
-//! `tts::layer_norm.out`), runs the voice model, sharpens the mel spectrogram,
-//! runs the vocoder, and trims + fades the audio.
+//! Loads the voice + vocoder `.pte` models via the port's `Module` API,
+//! registers our custom ops (`tts::istft.out`, `tts::layer_norm.out`) plus the
+//! XNNPACK backend and optimized CPU kernels, runs the voice model, sharpens
+//! the mel spectrogram, runs the vocoder, and trims + fades the audio.
 
 use std::sync::Once;
 
