@@ -1,13 +1,12 @@
-use divvun_speech::{Options, SAMPLE_RATE, Synthesizer};
+use divvun_speech::{Options, SAMPLE_RATE, Synthesizer, WordTiming};
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
 
-    // Parse optional flags
     let mut pace: f32 = 1.0;
     let mut speaker: i64 = 1;
     let mut language: i64 = 1;
@@ -28,16 +27,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 language = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(1);
             }
-            arg => {
-                positional.push(arg);
-            }
+            arg => positional.push(arg),
         }
         i += 1;
     }
 
-    if positional.len() < 3 {
+    if positional.len() < 4 {
         eprintln!(
-            "Usage: {} <voice.pte> <vocoder.pte> <text> [output.wav] [--pace <f32>] [--speaker <i64>] [--language <i64>]",
+            "Usage: {} <voice.pte> <vocoder.pte> <text> <out_dir> [--pace <f32>] [--speaker <i64>] [--language <i64>]",
             args[0]
         );
         std::process::exit(1);
@@ -46,43 +43,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let voice_path = PathBuf::from(positional[0]);
     let vocoder_path = PathBuf::from(positional[1]);
     let text = positional[2];
-    let output_path = positional
-        .get(3)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("output.wav"));
+    let out_dir = PathBuf::from(positional[3]);
+    fs::create_dir_all(&out_dir)?;
 
     println!("Loading models...");
     let mut synth = Synthesizer::new(&voice_path, &vocoder_path)?;
-    println!(
-        "Alphabet: {} symbols",
-        synth.text_processor().symbols().len()
-    );
 
-    println!("Synthesizing: \"{}\"", text);
-    println!(
-        "Options: pace={}, speaker={}, language={}",
-        pace, speaker, language
-    );
     let options = Options::new()
         .with_pace(pace)
         .with_speaker(speaker)
         .with_language(language);
-    let audio = synth.synthesize(text, &options)?;
 
+    println!("Synthesizing: {:?}", text);
+    let (audio, timings) = synth.synthesize_with_word_timings(text, &options)?;
     println!(
-        "Generated {} samples ({:.2}s)",
+        "Generated {} samples ({:.2}s @ {} Hz), {} word timings",
         audio.len(),
-        audio.len() as f32 / SAMPLE_RATE as f32
+        audio.len() as f32 / SAMPLE_RATE as f32,
+        SAMPLE_RATE,
+        timings.len(),
     );
 
-    // Write WAV file
-    write_wav(&output_path, &audio)?;
-    println!("Wrote {}", output_path.display());
+    let combined_path = out_dir.join("combined.wav");
+    write_wav(&combined_path, &audio)?;
+    println!("Wrote {}", combined_path.display());
+
+    println!();
+    println!("Per-word timings:");
+    println!("  {:>3} {:30}  start..end (s)         dur (s)", "#", "word");
+    for (i, t) in timings.iter().enumerate() {
+        let start_s = t.start_sample as f32 / SAMPLE_RATE as f32;
+        let end_s = t.end_sample as f32 / SAMPLE_RATE as f32;
+        println!(
+            "  {:>3} {:30}  {:>7.3}..{:>7.3}        {:>6.3}",
+            i,
+            format!("{:?}", t.word),
+            start_s,
+            end_s,
+            end_s - start_s,
+        );
+        let chunk = &audio[t.start_sample..t.end_sample];
+        let path = out_dir.join(per_word_filename(i, t));
+        write_wav(&path, chunk)?;
+    }
+    println!();
+    println!("Wrote {} per-word files to {}", timings.len(), out_dir.display());
 
     Ok(())
 }
 
-fn write_wav(path: &std::path::Path, samples: &[f32]) -> std::io::Result<()> {
+fn per_word_filename(i: usize, t: &WordTiming) -> String {
+    let safe: String = t
+        .word
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("word_{:02}_{}.wav", i, safe)
+}
+
+fn write_wav(path: &Path, samples: &[f32]) -> std::io::Result<()> {
     let mut file = BufWriter::new(File::create(path)?);
 
     let sample_rate: u32 = SAMPLE_RATE;
@@ -93,26 +112,23 @@ fn write_wav(path: &std::path::Path, samples: &[f32]) -> std::io::Result<()> {
     let data_size = (samples.len() * 4) as u32;
     let file_size = 36 + data_size;
 
-    // RIFF header
     file.write_all(b"RIFF")?;
     file.write_all(&file_size.to_le_bytes())?;
     file.write_all(b"WAVE")?;
 
-    // fmt chunk
     file.write_all(b"fmt ")?;
-    file.write_all(&16u32.to_le_bytes())?; // chunk size
-    file.write_all(&3u16.to_le_bytes())?; // format = IEEE float
+    file.write_all(&16u32.to_le_bytes())?;
+    file.write_all(&3u16.to_le_bytes())?; // IEEE float
     file.write_all(&num_channels.to_le_bytes())?;
     file.write_all(&sample_rate.to_le_bytes())?;
     file.write_all(&byte_rate.to_le_bytes())?;
     file.write_all(&block_align.to_le_bytes())?;
     file.write_all(&bits_per_sample.to_le_bytes())?;
 
-    // data chunk
     file.write_all(b"data")?;
     file.write_all(&data_size.to_le_bytes())?;
-    for sample in samples {
-        file.write_all(&sample.to_le_bytes())?;
+    for s in samples {
+        file.write_all(&s.to_le_bytes())?;
     }
 
     Ok(())

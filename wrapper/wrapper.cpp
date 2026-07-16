@@ -253,7 +253,9 @@ void tts_synthesizer_free(TtsSynthesizer* synth) {
     delete synth;
 }
 
-float* tts_synthesize(
+// Shared implementation. When out_durations/out_duration_count are non-null,
+// the function also returns the model's raw dur_pred prefix (length token_count).
+static float* synthesize_impl(
     TtsSynthesizer* synth,
     const int64_t* tokens,
     size_t token_count,
@@ -261,6 +263,8 @@ float* tts_synthesize(
     int64_t language_id,
     float pace,
     size_t* out_sample_count,
+    float** out_durations,
+    size_t* out_duration_count,
     TtsError* out_error,
     const char** out_error_detail
 ) {
@@ -273,6 +277,8 @@ float* tts_synthesize(
     }
 
     *out_sample_count = 0;
+    if (out_durations) *out_durations = nullptr;
+    if (out_duration_count) *out_duration_count = 0;
 
     // Memory for voice model
     testing::ManagedMemoryManager voice_mmm(
@@ -357,6 +363,35 @@ float* tts_synthesize(
         (int)mel_len_from_model,
         (long long)mel_tensor.size(1));
     fflush(stderr);
+
+    // Extract per-token durations if requested (output 2 of voice .pte).
+    // dur_pred is shape [1, T_padded] float32 where T_padded == VOICE_MAX_SEQ_LEN.
+    // We copy the first token_count entries; trailing entries correspond to
+    // zero-padded input tokens and are not meaningful.
+    if (out_durations) {
+        if (voice_method.outputs_size() < 3) {
+            set_error(out_error, TTS_ERROR_VOICE_OUTPUT_INVALID, out_error_detail,
+                      "voice model has no duration output (re-export with updated BoundedVoiceModel)");
+            return nullptr;
+        }
+        const EValue& dur_output = voice_method.get_output(2);
+        if (!dur_output.isTensor()) {
+            set_error(out_error, TTS_ERROR_VOICE_OUTPUT_INVALID, out_error_detail,
+                      "voice dur_pred output is not a tensor");
+            return nullptr;
+        }
+        const auto& dur_tensor = dur_output.toTensor();
+        size_t dur_padded = static_cast<size_t>(dur_tensor.size(dur_tensor.dim() - 1));
+        if (token_count > dur_padded) {
+            set_error(out_error, TTS_ERROR_VOICE_OUTPUT_INVALID, out_error_detail,
+                      "token_count exceeds dur_pred padded length");
+            return nullptr;
+        }
+        float* durs = new float[token_count];
+        memcpy(durs, dur_tensor.const_data_ptr<float>(), token_count * sizeof(float));
+        *out_durations = durs;
+        if (out_duration_count) *out_duration_count = token_count;
+    }
 
     // Sharpen mel spectrogram
     int mel_channels = static_cast<int>(mel_tensor.size(1));
@@ -472,8 +507,57 @@ float* tts_synthesize(
     return audio;
 }
 
+float* tts_synthesize(
+    TtsSynthesizer* synth,
+    const int64_t* tokens,
+    size_t token_count,
+    int64_t speaker_id,
+    int64_t language_id,
+    float pace,
+    size_t* out_sample_count,
+    TtsError* out_error,
+    const char** out_error_detail
+) {
+    return synthesize_impl(
+        synth, tokens, token_count, speaker_id, language_id, pace,
+        out_sample_count,
+        /*out_durations=*/nullptr, /*out_duration_count=*/nullptr,
+        out_error, out_error_detail
+    );
+}
+
+float* tts_synthesize_with_durations(
+    TtsSynthesizer* synth,
+    const int64_t* tokens,
+    size_t token_count,
+    int64_t speaker_id,
+    int64_t language_id,
+    float pace,
+    size_t* out_sample_count,
+    float** out_durations,
+    size_t* out_duration_count,
+    TtsError* out_error,
+    const char** out_error_detail
+) {
+    if (!out_durations || !out_duration_count) {
+        set_error(out_error, TTS_ERROR_INVALID_ARGUMENT, out_error_detail,
+                  "out_durations or out_duration_count is null");
+        return nullptr;
+    }
+    return synthesize_impl(
+        synth, tokens, token_count, speaker_id, language_id, pace,
+        out_sample_count,
+        out_durations, out_duration_count,
+        out_error, out_error_detail
+    );
+}
+
 void tts_free_audio(float* audio) {
     delete[] audio;
+}
+
+void tts_free_durations(float* durations) {
+    delete[] durations;
 }
 
 const char* tts_get_alphabet(

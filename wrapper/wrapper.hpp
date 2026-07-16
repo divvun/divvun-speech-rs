@@ -60,6 +60,28 @@ float* tts_synthesize(
 // Free audio buffer returned by tts_synthesize
 void tts_free_audio(float* audio);
 
+// Synthesize audio and also return per-token mel-frame durations.
+// Same audio as tts_synthesize, plus *out_durations = float32 array of length
+// token_count holding the model's raw per-token duration prediction (mel
+// frames, pre-pace, pre-rounding). Caller must free both out buffers.
+// Requires the voice .pte to have been re-exported with dur_pred as output 2.
+float* tts_synthesize_with_durations(
+    TtsSynthesizer* synth,
+    const int64_t* tokens,
+    size_t token_count,
+    int64_t speaker_id,
+    int64_t language_id,
+    float pace,
+    size_t* out_sample_count,
+    float** out_durations,
+    size_t* out_duration_count,
+    TtsError* out_error,
+    const char** out_error_detail
+);
+
+// Free durations buffer returned by tts_synthesize_with_durations
+void tts_free_durations(float* durations);
+
 // Get embedded alphabet from voice model (JSON-encoded UTF-8 string)
 // Returns NULL if not embedded, caller must free with tts_free_alphabet
 // out_len receives the byte length of the returned buffer (not null-terminated)

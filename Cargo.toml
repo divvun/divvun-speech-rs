@@ -6,10 +6,12 @@ edition = "2024"
 [lib]
 crate-type = ["lib", "staticlib"]
 
-[build-dependencies]
-cmake = "0.1"
-
 [dependencies]
+# Native Rust ExecuTorch port (replaces the old C++ FFI wrapper). The `xnnpack`
+# feature builds/links the native XNNPACK submodule so the delegated
+# voice/vocoder models run. Published at divvun/executorch-rs; Cargo.lock pins
+# the exact commit.
+executorch = { git = "https://github.com/divvun/executorch-rs", features = ["xnnpack"] }
 libc = "0.2"
 thiserror = "2"
 serde_json = "1"
