@@ -6,7 +6,7 @@
 //! XNNPACK backend and optimized CPU kernels, runs the voice model, sharpens
 //! the mel spectrogram, runs the vocoder, and trims + fades the audio.
 
-use std::sync::Once;
+use std::{sync::Once, time::Instant};
 
 use executorch::extension::module::module::{LoadMode, Module};
 use executorch::extension::tensor::tensor_ptr::{make_tensor_ptr_from_vec, TensorPtr};
@@ -236,6 +236,7 @@ impl Engine {
         pace: f32,
         want_durations: bool,
     ) -> Result<(Vec<f32>, Vec<f32>), EngineError> {
+        let total_start = Instant::now();
         if tokens.is_empty() {
             return Err(EngineError::ShapeMismatch("empty token sequence".into()));
         }
@@ -264,10 +265,13 @@ impl Engine {
             EValue::from_tensor(self.voice_language.tensor()),
             EValue::from_tensor(self.voice_pace.tensor()),
         ];
+        let voice_start = Instant::now();
         let voice_outputs = self
             .voice
             .execute("forward", &voice_inputs)
             .map_err(EngineError::VoiceExecute)?;
+        let voice_elapsed = voice_start.elapsed();
+        let mel_start = Instant::now();
 
         if voice_outputs.is_empty() || !voice_outputs[0].is_tensor() {
             return Err(EngineError::VoiceOutput("voice output 0 is not a tensor"));
@@ -319,10 +323,14 @@ impl Engine {
             std::ptr::copy_nonoverlapping(mel_data.as_ptr(), dst, mel_data.len());
         }
         let vocoder_inputs = vec![EValue::from_tensor(self.vocoder_mel.tensor())];
+        let mel_elapsed = mel_start.elapsed();
+        let vocoder_start = Instant::now();
         let vocoder_outputs = self
             .vocoder
             .execute("forward", &vocoder_inputs)
             .map_err(EngineError::VocoderExecute)?;
+        let vocoder_elapsed = vocoder_start.elapsed();
+        let audio_start = Instant::now();
 
         if vocoder_outputs.is_empty() || !vocoder_outputs[0].is_tensor() {
             return Err(EngineError::VocoderOutput("vocoder output 0 is not a tensor"));
@@ -342,6 +350,21 @@ impl Engine {
         .to_vec();
 
         apply_fade(&mut audio);
+
+        let audio_elapsed = audio_start.elapsed();
+        tracing::info!(
+            target: "divvun_speech::timing",
+            tokens = tokens.len(),
+            padded_mel_frames = mel_len,
+            actual_mel_frames = actual_mel_len,
+            output_samples = audio.len(),
+            voice_ms = voice_elapsed.as_secs_f64() * 1000.0,
+            mel_postprocess_ms = mel_elapsed.as_secs_f64() * 1000.0,
+            vocoder_ms = vocoder_elapsed.as_secs_f64() * 1000.0,
+            audio_postprocess_ms = audio_elapsed.as_secs_f64() * 1000.0,
+            total_ms = total_start.elapsed().as_secs_f64() * 1000.0,
+            "TTS phase timings"
+        );
 
         Ok((audio, durations))
     }
