@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "executorch"
 version = "0.1.0"
-source = "git+https://github.com/divvun/executorch-rs#5c1533743c85fb9ff4f7ea91fe97267ce621e60a"
+source = "git+https://github.com/divvun/executorch-rs#6825c3b9a09597881af3196bb00cf260ae32fa7c"
 dependencies = [
  "cmake",
  "executorch-macros",
@@ -161,7 +161,7 @@ dependencies = [
 [[package]]
 name = "executorch-macros"
 version = "0.1.0"
-source = "git+https://github.com/divvun/executorch-rs#5c1533743c85fb9ff4f7ea91fe97267ce621e60a"
+source = "git+https://github.com/divvun/executorch-rs#6825c3b9a09597881af3196bb00cf260ae32fa7c"
 dependencies = [
  "proc-macro2",
  "quote",
