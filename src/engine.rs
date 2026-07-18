@@ -6,12 +6,16 @@
 //! XNNPACK backend and optimized CPU kernels, runs the voice model, sharpens
 //! the mel spectrogram, runs the vocoder, and trims + fades the audio.
 
-use std::{sync::Once, time::Instant};
+use std::mem::ManuallyDrop;
+use std::sync::Once;
+use std::time::Instant;
 
 use executorch::extension::module::module::{LoadMode, Module};
 use executorch::extension::tensor::tensor_ptr::{make_tensor_ptr_from_vec, TensorPtr};
+use executorch::runtime::core::array_ref::ArrayRef;
 use executorch::runtime::core::error::Error as EtError;
 use executorch::runtime::core::evalue::EValue;
+use executorch::runtime::core::exec_aten::util::tensor_util::resize_tensor;
 use executorch::runtime::core::portable_type::scalar_type::ScalarType;
 use executorch::runtime::core::span::Span;
 use executorch::runtime::core::tensor_shape_dynamism::TensorShapeDynamism;
@@ -81,7 +85,7 @@ fn span_to_vec_i32(span: Span<i32>) -> Vec<i32> {
 /// engine and its data is overwritten in place before each run; leaking it lets
 /// the resulting `EValue`s share the (`'static`) module's lifetime, which the
 /// port's `Module::execute` requires. Bounded: a handful per engine.
-fn leak_i64_tensor(sizes: Vec<i32>) -> &'static TensorPtr {
+fn leak_i64_tensor(sizes: Vec<i32>, dynamism: TensorShapeDynamism) -> &'static TensorPtr {
     let numel: usize = sizes.iter().map(|&s| s as usize).product();
     let tp = make_tensor_ptr_from_vec(
         sizes,
@@ -89,7 +93,7 @@ fn leak_i64_tensor(sizes: Vec<i32>) -> &'static TensorPtr {
         Vec::new(),
         Vec::new(),
         ScalarType::Long,
-        TensorShapeDynamism::STATIC,
+        dynamism,
     );
     Box::leak(Box::new(tp))
 }
@@ -108,10 +112,16 @@ fn leak_f32_tensor(sizes: Vec<i32>) -> &'static TensorPtr {
 }
 
 pub struct Engine {
-    voice: Module<'static>,
-    vocoder: Module<'static>,
+    // ManuallyDrop so `Drop for Engine` can drop the modules BEFORE reclaiming
+    // the leaked input tensors below: a loaded Method may alias input tensor
+    // data (ExecuTorch's `share_tensor_data` path for non-memory-planned
+    // inputs), so the tensors must outlive the modules.
+    voice: ManuallyDrop<Module<'static>>,
+    vocoder: ManuallyDrop<Module<'static>>,
 
-    // Reused, `'static` input tensors (see `leak_i64_tensor`).
+    // Reused input tensors, leaked to `'static` to satisfy `Module::execute`'s
+    // input lifetime bound, and reclaimed in `Drop` (see below) so engine churn
+    // doesn't accumulate leaks.
     voice_tokens: &'static TensorPtr,
     voice_speaker: &'static TensorPtr,
     voice_language: &'static TensorPtr,
@@ -183,15 +193,19 @@ impl Engine {
         );
         let vocoder_mel_numel: usize = mel_sizes.iter().map(|&s| s as usize).product();
 
-        let voice_tokens = leak_i64_tensor(tokens_sizes);
-        let voice_speaker = leak_i64_tensor(speaker_sizes);
-        let voice_language = leak_i64_tensor(language_sizes);
+        // The token input is resized to the actual sequence length per call
+        // (the voice model is exported with a bounded-dynamic seq dim), so the
+        // reusable tensor is DYNAMIC_BOUND with capacity max_seq_len. Running
+        // at the real length skips the encoder work for padding positions.
+        let voice_tokens = leak_i64_tensor(tokens_sizes, TensorShapeDynamism::DYNAMIC_BOUND);
+        let voice_speaker = leak_i64_tensor(speaker_sizes, TensorShapeDynamism::STATIC);
+        let voice_language = leak_i64_tensor(language_sizes, TensorShapeDynamism::STATIC);
         let voice_pace = leak_f32_tensor(pace_sizes);
         let vocoder_mel = leak_f32_tensor(mel_sizes);
 
         Ok(Self {
-            voice,
-            vocoder,
+            voice: ManuallyDrop::new(voice),
+            vocoder: ManuallyDrop::new(vocoder),
             voice_tokens,
             voice_speaker,
             voice_language,
@@ -248,11 +262,23 @@ impl Engine {
             )));
         }
 
-        // Fill the reused voice inputs in place. Tokens are zero-filled (token 0
-        // is padding, masked by the model) then overwritten with the sequence.
+        // Resize the reusable token tensor to the actual sequence length (the
+        // voice model has a bounded-dynamic seq dim, verified to work at
+        // runtime: shorter inputs skip the encoder work for padding positions
+        // and avoid pad-boundary artifacts) and fill the inputs in place.
+        let tok_sizes: [i32; 2] = [1, tokens.len() as i32];
+        let err = resize_tensor(
+            &self.voice_tokens.tensor(),
+            ArrayRef::from_raw_parts(tok_sizes.as_ptr(), tok_sizes.len()),
+        );
+        if err != EtError::Ok {
+            return Err(EngineError::ShapeMismatch(format!(
+                "failed to resize token input to [1, {}]: {err:?}",
+                tokens.len()
+            )));
+        }
         unsafe {
             let tok_ptr = self.voice_tokens.tensor().mutable_data_ptr::<i64>();
-            std::ptr::write_bytes(tok_ptr, 0, self.max_seq_len);
             std::ptr::copy_nonoverlapping(tokens.as_ptr(), tok_ptr, tokens.len());
             *self.voice_speaker.tensor().mutable_data_ptr::<i64>() = speaker_id;
             *self.voice_language.tensor().mutable_data_ptr::<i64>() = language_id;
@@ -367,6 +393,33 @@ impl Engine {
         );
 
         Ok((audio, durations))
+    }
+}
+
+// Reclaim the input tensors that were leaked to `'static` for
+// `Module::execute`'s input lifetime bound, so repeated Engine
+// creation/destruction (e.g. voice switching) doesn't accumulate leaks.
+//
+// SAFETY: the modules are dropped first (they may alias input tensor data via
+// ExecuTorch's `share_tensor_data` path); after that nothing references the
+// tensors — borrows created in `synthesize` never outlive the call — so
+// re-boxing and dropping the `Box::leak`ed allocations is sound. The
+// `ManuallyDrop` fields are not touched again after this runs.
+impl Drop for Engine {
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.voice);
+            ManuallyDrop::drop(&mut self.vocoder);
+            for tp in [
+                self.voice_tokens,
+                self.voice_speaker,
+                self.voice_language,
+                self.voice_pace,
+                self.vocoder_mel,
+            ] {
+                drop(Box::from_raw(tp as *const TensorPtr as *mut TensorPtr));
+            }
+        }
     }
 }
 
