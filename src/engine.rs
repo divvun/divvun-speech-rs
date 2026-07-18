@@ -98,7 +98,7 @@ fn leak_i64_tensor(sizes: Vec<i32>, dynamism: TensorShapeDynamism) -> &'static T
     Box::leak(Box::new(tp))
 }
 
-fn leak_f32_tensor(sizes: Vec<i32>) -> &'static TensorPtr {
+fn leak_f32_tensor(sizes: Vec<i32>, dynamism: TensorShapeDynamism) -> &'static TensorPtr {
     let numel: usize = sizes.iter().map(|&s| s as usize).product();
     let tp = make_tensor_ptr_from_vec(
         sizes,
@@ -106,9 +106,25 @@ fn leak_f32_tensor(sizes: Vec<i32>) -> &'static TensorPtr {
         Vec::new(),
         Vec::new(),
         ScalarType::Float,
-        TensorShapeDynamism::STATIC,
+        dynamism,
     );
     Box::leak(Box::new(tp))
+}
+
+/// State for the split voice model (`encode` + `decode` methods, FastPitch cut
+/// at regulate_len). The host performs length regulation between the methods,
+/// so the decoder and (dynamic) vocoder run at the ACTUAL mel length M instead
+/// of the padded max — per-call cost scales with content length.
+struct SplitState {
+    /// Reusable `[1, max_mel_frames, d_model]` enc_rep input for `decode`,
+    /// resized to the actual M per call. Leaked like the other inputs;
+    /// reclaimed in `Drop`.
+    enc_rep: &'static TensorPtr,
+    max_mel_frames: usize,
+    d_model: usize,
+    /// Whether the vocoder accepts dynamic `[1, 80, M]` input. Probed on first
+    /// use: `None` = unknown, `Some(false)` = fixed-shape vocoder (pad to max).
+    vocoder_dynamic: Option<bool>,
 }
 
 pub struct Engine {
@@ -137,6 +153,9 @@ pub struct Engine {
     /// just can't produce durations, so timing requests degrade to empty rather
     /// than failing.
     has_durations: bool,
+    /// Present when the voice model is the split export (encode + decode
+    /// methods); `None` for the single-pass `forward` export.
+    split: Option<SplitState>,
 }
 
 impl Engine {
@@ -156,12 +175,20 @@ impl Engine {
             return Err(EngineError::VocoderLoad(err));
         }
 
+        // Split export (encode + decode methods, FastPitch cut at regulate_len)
+        // vs single-pass `forward` export.
+        let method_names = voice.method_names().map_err(EngineError::VoiceMethod)?;
+        let is_split = method_names.contains("encode") && method_names.contains("decode");
+        let main_method = if is_split { "encode" } else { "forward" };
+
         // Introspect the voice model's input shapes: input 0 = tokens
-        // [1, max_seq_len] (i64), 1 = speaker id, 2 = language id (i64), 3 = pace
-        // (f32).
-        let vmeta = voice.method_meta("forward").map_err(EngineError::VoiceMethod)?;
-        if vmeta.num_inputs() < 4 {
-            return Err(EngineError::VoiceOutput("voice 'forward' needs >= 4 inputs"));
+        // [1, max_seq_len] (i64), 1 = speaker id, 2 = language id (i64), and —
+        // single-pass only — 3 = pace (f32). The split export applies pace on
+        // the host in regulate_len, so `encode` has no pace input.
+        let vmeta = voice.method_meta(main_method).map_err(EngineError::VoiceMethod)?;
+        let min_inputs = if is_split { 3 } else { 4 };
+        if vmeta.num_inputs() < min_inputs {
+            return Err(EngineError::VoiceOutput("voice method is missing inputs"));
         }
         let tokens_sizes = span_to_vec_i32(
             vmeta.input_tensor_meta(0).map_err(EngineError::VoiceMethod)?.sizes(),
@@ -172,19 +199,39 @@ impl Engine {
         let language_sizes = span_to_vec_i32(
             vmeta.input_tensor_meta(2).map_err(EngineError::VoiceMethod)?.sizes(),
         );
-        let pace_sizes = span_to_vec_i32(
-            vmeta.input_tensor_meta(3).map_err(EngineError::VoiceMethod)?.sizes(),
-        );
+        let pace_sizes = if is_split {
+            vec![1]
+        } else {
+            span_to_vec_i32(vmeta.input_tensor_meta(3).map_err(EngineError::VoiceMethod)?.sizes())
+        };
 
         let max_seq_len = *tokens_sizes.last().unwrap_or(&0) as usize;
         if max_seq_len == 0 {
             return Err(EngineError::VoiceOutput("voice token input has no length"));
         }
 
-        // Per-word timings need the voice model's 3rd output (`dur_pred`). Older
-        // exports emit only (mel, mel_lens); detect that here so timing requests
-        // can degrade gracefully instead of failing.
-        let has_durations = vmeta.num_outputs() >= 3;
+        // Per-word timings need per-token durations: `encode`'s 2nd output in
+        // the split export, `forward`'s 3rd output (dur_pred) otherwise. Older
+        // single-pass exports emit only (mel, mel_lens); detect that here so
+        // timing requests degrade gracefully instead of failing.
+        let has_durations = vmeta.num_outputs() >= if is_split { 2 } else { 3 };
+
+        // Split export: introspect `decode`'s enc_rep input [1, max_mel, d_model].
+        let split = if is_split {
+            let dmeta = voice.method_meta("decode").map_err(EngineError::VoiceMethod)?;
+            let rep_sizes = span_to_vec_i32(
+                dmeta.input_tensor_meta(0).map_err(EngineError::VoiceMethod)?.sizes(),
+            );
+            if rep_sizes.len() != 3 {
+                return Err(EngineError::VoiceOutput("decode input must be [1, M, d_model]"));
+            }
+            let max_mel_frames = rep_sizes[1] as usize;
+            let d_model = rep_sizes[2] as usize;
+            let enc_rep = leak_f32_tensor(rep_sizes, TensorShapeDynamism::DYNAMIC_BOUND);
+            Some(SplitState { enc_rep, max_mel_frames, d_model, vocoder_dynamic: None })
+        } else {
+            None
+        };
 
         // Introspect the vocoder's mel input shape [1, C, T].
         let vocmeta = vocoder.method_meta("forward").map_err(EngineError::VocoderMethod)?;
@@ -200,8 +247,10 @@ impl Engine {
         let voice_tokens = leak_i64_tensor(tokens_sizes, TensorShapeDynamism::DYNAMIC_BOUND);
         let voice_speaker = leak_i64_tensor(speaker_sizes, TensorShapeDynamism::STATIC);
         let voice_language = leak_i64_tensor(language_sizes, TensorShapeDynamism::STATIC);
-        let voice_pace = leak_f32_tensor(pace_sizes);
-        let vocoder_mel = leak_f32_tensor(mel_sizes);
+        let voice_pace = leak_f32_tensor(pace_sizes, TensorShapeDynamism::STATIC);
+        // DYNAMIC_BOUND so the split path can feed the actual [1, 80, M]; the
+        // forward path never resizes it (stays at the full capacity).
+        let vocoder_mel = leak_f32_tensor(mel_sizes, TensorShapeDynamism::DYNAMIC_BOUND);
 
         Ok(Self {
             voice: ManuallyDrop::new(voice),
@@ -214,6 +263,7 @@ impl Engine {
             max_seq_len,
             vocoder_mel_numel,
             has_durations,
+            split,
         })
     }
 
@@ -260,6 +310,9 @@ impl Engine {
                 tokens.len(),
                 self.max_seq_len
             )));
+        }
+        if self.split.is_some() {
+            return self.synthesize_split(tokens, speaker_id, language_id, pace, want_durations);
         }
 
         // Resize the reusable token tensor to the actual sequence length (the
@@ -394,6 +447,263 @@ impl Engine {
 
         Ok((audio, durations))
     }
+
+    /// Split-model path: `encode` → host-side regulate_len → `decode` →
+    /// vocoder, everything at the ACTUAL mel length M so per-call cost scales
+    /// with content instead of paying the padded max.
+    fn synthesize_split(
+        &mut self,
+        tokens: &[i64],
+        speaker_id: i64,
+        language_id: i64,
+        pace: f32,
+        want_durations: bool,
+    ) -> Result<(Vec<f32>, Vec<f32>), EngineError> {
+        let total_start = Instant::now();
+        let (enc_rep, max_mel_frames, d_model) = {
+            let s = self.split.as_ref().expect("split state");
+            (s.enc_rep, s.max_mel_frames, s.d_model)
+        };
+
+        // ---- encode: tokens [1, N] -> enc_out [1, N, d_model] + dur [1, N] ----
+        let tok_sizes: [i32; 2] = [1, tokens.len() as i32];
+        let err = resize_tensor(
+            &self.voice_tokens.tensor(),
+            ArrayRef::from_raw_parts(tok_sizes.as_ptr(), tok_sizes.len()),
+        );
+        if err != EtError::Ok {
+            return Err(EngineError::ShapeMismatch(format!(
+                "failed to resize token input to [1, {}]: {err:?}",
+                tokens.len()
+            )));
+        }
+        unsafe {
+            let tok_ptr = self.voice_tokens.tensor().mutable_data_ptr::<i64>();
+            std::ptr::copy_nonoverlapping(tokens.as_ptr(), tok_ptr, tokens.len());
+            *self.voice_speaker.tensor().mutable_data_ptr::<i64>() = speaker_id;
+            *self.voice_language.tensor().mutable_data_ptr::<i64>() = language_id;
+        }
+        let encode_inputs = vec![
+            EValue::from_tensor(self.voice_tokens.tensor()),
+            EValue::from_tensor(self.voice_speaker.tensor()),
+            EValue::from_tensor(self.voice_language.tensor()),
+        ];
+        let encode_start = Instant::now();
+        let encode_outputs = self
+            .voice
+            .execute("encode", &encode_inputs)
+            .map_err(EngineError::VoiceExecute)?;
+        let encode_elapsed = encode_start.elapsed();
+
+        if encode_outputs.len() < 2 || !encode_outputs[0].is_tensor() || !encode_outputs[1].is_tensor()
+        {
+            return Err(EngineError::VoiceOutput("encode must output (enc_out, dur_pred)"));
+        }
+        let enc_out = encode_outputs[0].to_tensor();
+        if enc_out.dim() != 3
+            || enc_out.size(2) as usize != d_model
+            || (enc_out.size(1) as usize) < tokens.len()
+        {
+            return Err(EngineError::ShapeMismatch(format!(
+                "unexpected enc_out shape (last dim {}, expected d_model {})",
+                enc_out.size(2),
+                d_model
+            )));
+        }
+        let dur = encode_outputs[1].to_tensor();
+        if (dur.numel() as usize) < tokens.len() {
+            return Err(EngineError::VoiceOutput("dur_pred shorter than token count"));
+        }
+        let durations: Vec<f32> =
+            unsafe { std::slice::from_raw_parts(dur.const_data_ptr::<f32>(), tokens.len()) }
+                .to_vec();
+
+        // ---- regulate_len on the host (mirrors the model: reps = floor(dur /
+        // pace + 0.5), frames capped at max_mel_frames) ----
+        let pace = if pace > 0.0 { pace } else { 1.0 };
+        let reps: Vec<usize> = durations
+            .iter()
+            .map(|&d| {
+                let r = (d / pace + 0.5).floor();
+                if r > 0.0 { r as usize } else { 0 }
+            })
+            .collect();
+        let m_real: usize = reps.iter().sum::<usize>().min(max_mel_frames);
+        if m_real == 0 {
+            return Err(EngineError::VoiceOutput("predicted zero total duration"));
+        }
+        // decode is traced with mel_frames >= 4; pad tiny inputs by repeating
+        // the last frame (audio is trimmed back to m_real below).
+        let m = m_real.max(4);
+
+        let rep_sizes: [i32; 3] = [1, m as i32, d_model as i32];
+        let err = resize_tensor(
+            &enc_rep.tensor(),
+            ArrayRef::from_raw_parts(rep_sizes.as_ptr(), rep_sizes.len()),
+        );
+        if err != EtError::Ok {
+            return Err(EngineError::ShapeMismatch(format!(
+                "failed to resize enc_rep to [1, {m}, {d_model}]: {err:?}"
+            )));
+        }
+        unsafe {
+            let src = enc_out.const_data_ptr::<f32>();
+            let dst = enc_rep.tensor().mutable_data_ptr::<f32>();
+            let mut frame = 0usize;
+            'fill: for (i, &r) in reps.iter().enumerate() {
+                for _ in 0..r {
+                    if frame >= m {
+                        break 'fill;
+                    }
+                    std::ptr::copy_nonoverlapping(
+                        src.add(i * d_model),
+                        dst.add(frame * d_model),
+                        d_model,
+                    );
+                    frame += 1;
+                }
+            }
+            // Pad up to the m >= 4 floor by repeating the last written frame.
+            while frame > 0 && frame < m {
+                std::ptr::copy_nonoverlapping(
+                    dst.add((frame - 1) * d_model) as *const f32,
+                    dst.add(frame * d_model),
+                    d_model,
+                );
+                frame += 1;
+            }
+        }
+
+        // ---- decode: enc_rep [1, M, d_model] -> mel [1, 80, M] ----
+        let decode_inputs = vec![EValue::from_tensor(enc_rep.tensor())];
+        let decode_start = Instant::now();
+        let decode_outputs = self
+            .voice
+            .execute("decode", &decode_inputs)
+            .map_err(EngineError::VoiceExecute)?;
+        let decode_elapsed = decode_start.elapsed();
+        if decode_outputs.is_empty() || !decode_outputs[0].is_tensor() {
+            return Err(EngineError::VoiceOutput("decode output 0 is not a tensor"));
+        }
+        let mel = decode_outputs[0].to_tensor();
+        let mel_channels = mel.size(1) as usize;
+        let mel_len = mel.size(2) as usize;
+        let mel_numel = mel.numel() as usize;
+
+        let mel_start = Instant::now();
+        let mut mel_data =
+            unsafe { std::slice::from_raw_parts(mel.const_data_ptr::<f32>(), mel_numel) }.to_vec();
+        sharpen_mel(&mut mel_data, mel_channels, mel_len);
+        let mel_elapsed = mel_start.elapsed();
+
+        // ---- vocoder: dynamic [1, 80, M] if the export supports it, else pad
+        // into the fixed [1, 80, T_max] (probed once, remembered) ----
+        let vocoder_start = Instant::now();
+        let prior = self.split.as_ref().expect("split state").vocoder_dynamic;
+        let mut used_dynamic = false;
+        let mut vocoder_outputs = None;
+        if prior != Some(false) {
+            let vsizes: [i32; 3] = [1, mel_channels as i32, mel_len as i32];
+            let err = resize_tensor(
+                &self.vocoder_mel.tensor(),
+                ArrayRef::from_raw_parts(vsizes.as_ptr(), vsizes.len()),
+            );
+            if err == EtError::Ok {
+                unsafe {
+                    let dst = self.vocoder_mel.tensor().mutable_data_ptr::<f32>();
+                    std::ptr::copy_nonoverlapping(mel_data.as_ptr(), dst, mel_data.len());
+                }
+                let vocoder_inputs = vec![EValue::from_tensor(self.vocoder_mel.tensor())];
+                match self.vocoder.execute("forward", &vocoder_inputs) {
+                    Ok(o) => {
+                        used_dynamic = true;
+                        vocoder_outputs = Some(o);
+                    }
+                    Err(e) => {
+                        if prior == Some(true) {
+                            return Err(EngineError::VocoderExecute(e));
+                        }
+                        tracing::info!(
+                            "vocoder rejected dynamic mel input; falling back to fixed-shape padding"
+                        );
+                    }
+                }
+            }
+        }
+        let vocoder_outputs = match vocoder_outputs {
+            Some(o) => o,
+            None => {
+                // Fixed-shape vocoder: zero-pad each mel row out to T_max.
+                let t_max = self.vocoder_mel_numel / mel_channels;
+                let vsizes: [i32; 3] = [1, mel_channels as i32, t_max as i32];
+                let err = resize_tensor(
+                    &self.vocoder_mel.tensor(),
+                    ArrayRef::from_raw_parts(vsizes.as_ptr(), vsizes.len()),
+                );
+                if err != EtError::Ok {
+                    return Err(EngineError::ShapeMismatch(format!(
+                        "failed to restore vocoder mel input to [1, {mel_channels}, {t_max}]: {err:?}"
+                    )));
+                }
+                unsafe {
+                    let dst = self.vocoder_mel.tensor().mutable_data_ptr::<f32>();
+                    std::ptr::write_bytes(dst, 0, self.vocoder_mel_numel);
+                    for c in 0..mel_channels {
+                        std::ptr::copy_nonoverlapping(
+                            mel_data.as_ptr().add(c * mel_len),
+                            dst.add(c * t_max),
+                            mel_len,
+                        );
+                    }
+                }
+                let vocoder_inputs = vec![EValue::from_tensor(self.vocoder_mel.tensor())];
+                self.vocoder
+                    .execute("forward", &vocoder_inputs)
+                    .map_err(EngineError::VocoderExecute)?
+            }
+        };
+        self.split.as_mut().expect("split state").vocoder_dynamic = Some(used_dynamic);
+        let vocoder_elapsed = vocoder_start.elapsed();
+
+        let audio_start = Instant::now();
+        if vocoder_outputs.is_empty() || !vocoder_outputs[0].is_tensor() {
+            return Err(EngineError::VocoderOutput("vocoder output 0 is not a tensor"));
+        }
+        let audio_tensor = vocoder_outputs[0].to_tensor();
+        let total_audio_len = audio_tensor.numel() as usize;
+
+        // Skip the ISTFT center-padding prefix, then trim to the real length.
+        let actual_audio_len = m_real * HOP_LENGTH;
+        let offset = if total_audio_len > N_FFT_HALF { N_FFT_HALF } else { 0 };
+        let available = total_audio_len - offset;
+        let num_samples = actual_audio_len.min(available);
+
+        let mut audio = unsafe {
+            std::slice::from_raw_parts(audio_tensor.const_data_ptr::<f32>().add(offset), num_samples)
+        }
+        .to_vec();
+
+        apply_fade(&mut audio);
+
+        let audio_elapsed = audio_start.elapsed();
+        tracing::info!(
+            target: "divvun_speech::timing",
+            tokens = tokens.len(),
+            mel_frames = m_real,
+            output_samples = audio.len(),
+            vocoder_dynamic = used_dynamic,
+            encode_ms = encode_elapsed.as_secs_f64() * 1000.0,
+            decode_ms = decode_elapsed.as_secs_f64() * 1000.0,
+            mel_postprocess_ms = mel_elapsed.as_secs_f64() * 1000.0,
+            vocoder_ms = vocoder_elapsed.as_secs_f64() * 1000.0,
+            audio_postprocess_ms = audio_elapsed.as_secs_f64() * 1000.0,
+            total_ms = total_start.elapsed().as_secs_f64() * 1000.0,
+            "TTS phase timings (split)"
+        );
+
+        let durations = if want_durations { durations } else { Vec::new() };
+        Ok((audio, durations))
+    }
 }
 
 // Reclaim the input tensors that were leaked to `'static` for
@@ -410,13 +720,17 @@ impl Drop for Engine {
         unsafe {
             ManuallyDrop::drop(&mut self.voice);
             ManuallyDrop::drop(&mut self.vocoder);
-            for tp in [
+            let mut leaked = vec![
                 self.voice_tokens,
                 self.voice_speaker,
                 self.voice_language,
                 self.voice_pace,
                 self.vocoder_mel,
-            ] {
+            ];
+            if let Some(s) = &self.split {
+                leaked.push(s.enc_rep);
+            }
+            for tp in leaked {
                 drop(Box::from_raw(tp as *const TensorPtr as *mut TensorPtr));
             }
         }
