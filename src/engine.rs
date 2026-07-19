@@ -221,6 +221,24 @@ impl Engine {
         let is_split = method_names.contains("encode") && method_names.contains("decode");
         let main_method = if is_split { "encode" } else { "forward" };
 
+        // Loading a Module only parses the program. Eagerly load its methods so
+        // callers that construct a voice for prewarming do not pay backend and
+        // delegate initialization during the first synthesis.
+        for method_name in if is_split {
+            &["encode", "decode"][..]
+        } else {
+            &["forward"][..]
+        } {
+            let err = voice.load_method_with_defaults(method_name);
+            if err != EtError::Ok {
+                return Err(EngineError::VoiceMethod(err));
+            }
+        }
+        let err = vocoder.load_method_with_defaults("forward");
+        if err != EtError::Ok {
+            return Err(EngineError::VocoderMethod(err));
+        }
+
         // Introspect the voice model's input shapes: input 0 = tokens
         // [1, max_seq_len] (i64), 1 = speaker id, 2 = language id (i64), and —
         // single-pass only — 3 = pace (f32). The split export applies pace on
