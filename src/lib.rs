@@ -4,6 +4,8 @@ mod text;
 
 use std::path::Path;
 
+use mmap_io::segment::Segment;
+
 pub use symbols::*;
 pub use text::{SymbolSet, TextProcessor, WordSpan};
 
@@ -149,8 +151,16 @@ impl Synthesizer {
         let voice = voice_path.as_ref().to_str().ok_or(Error::InvalidPath)?;
         let vocoder = vocoder_path.as_ref().to_str().ok_or(Error::InvalidPath)?;
 
-        let engine = engine::Engine::new(voice, vocoder)?;
+        Self::from_engine(engine::Engine::new(voice, vocoder)?)
+    }
 
+    /// Create a synthesizer from voice and vocoder records that are already
+    /// memory-mapped. Both mappings remain owned by the synthesizer.
+    pub fn new_mapped(voice: Segment, vocoder: Segment) -> Result<Self, SynthesisError> {
+        Self::from_engine(engine::Engine::new_mapped(voice, vocoder)?)
+    }
+
+    fn from_engine(engine: engine::Engine) -> Result<Self, SynthesisError> {
         // Extract and parse the embedded JSON alphabet.
         let alphabet_bytes = engine.alphabet_json()?;
         let symbols: Vec<String> = serde_json::from_slice(&alphabet_bytes)

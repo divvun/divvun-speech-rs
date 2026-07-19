@@ -7,9 +7,10 @@
 //! the mel spectrogram, runs the vocoder, and trims + fades the audio.
 
 use std::mem::ManuallyDrop;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use std::time::Instant;
 
+use executorch::extension::data_loader::shared_ptr_data_loader::SharedPtrDataLoader;
 use executorch::extension::module::module::{LoadMode, Module};
 use executorch::extension::tensor::tensor_ptr::{make_tensor_ptr_from_vec, TensorPtr};
 use executorch::runtime::core::array_ref::ArrayRef;
@@ -20,6 +21,7 @@ use executorch::runtime::core::portable_type::scalar_type::ScalarType;
 use executorch::runtime::core::span::Span;
 use executorch::runtime::core::tensor_shape_dynamism::TensorShapeDynamism;
 use executorch::runtime::executor::program::Verification;
+use mmap_io::segment::Segment;
 
 /// Vocoder hop length — audio samples per mel frame.
 pub const HOP_LENGTH: usize = 256;
@@ -162,14 +164,52 @@ impl Engine {
     pub fn new(voice_path: &str, vocoder_path: &str) -> Result<Self, EngineError> {
         ensure_runtime_registered();
 
-        let mut voice = Module::from_file_path(voice_path, LoadMode::Mmap, None, None, None, false);
+        let voice = Module::from_file_path(voice_path, LoadMode::Mmap, None, None, None, false);
+        let vocoder = Module::from_file_path(vocoder_path, LoadMode::Mmap, None, None, None, false);
+        Self::from_modules(voice, vocoder)
+    }
+
+    /// Load voice and vocoder programs directly from owned memory-mapped
+    /// segments. The module's data loader owns each segment, so ExecuTorch's
+    /// borrowed program data remains valid for the lifetime of the engine.
+    pub fn new_mapped(voice: Segment, vocoder: Segment) -> Result<Self, EngineError> {
+        ensure_runtime_registered();
+
+        let voice = Self::module_from_segment(voice).map_err(EngineError::VoiceLoad)?;
+        let vocoder = Self::module_from_segment(vocoder).map_err(EngineError::VocoderLoad)?;
+        Self::from_modules(voice, vocoder)
+    }
+
+    fn module_from_segment(segment: Segment) -> Result<Module<'static>, EtError> {
+        let segment = Arc::new(segment);
+        let bytes = segment.as_slice().map_err(|_| EtError::InvalidArgument)?;
+        if (bytes.as_ptr() as usize) % 16 != 0 {
+            return Err(EtError::InvalidArgument);
+        }
+
+        let data_ptr = bytes.as_ptr() as *const core::ffi::c_void;
+        let size = bytes.len();
+        let owner: Arc<dyn core::any::Any + Send + Sync> = segment.clone();
+        let loader = SharedPtrDataLoader::new(owner, data_ptr, size);
+        Ok(Module::from_data_loader(
+            Box::new(loader),
+            None,
+            None,
+            None,
+            None,
+            false,
+        ))
+    }
+
+    fn from_modules(
+        mut voice: Module<'static>,
+        mut vocoder: Module<'static>,
+    ) -> Result<Self, EngineError> {
         let err = voice.load(Verification::Minimal);
         if err != EtError::Ok {
             return Err(EngineError::VoiceLoad(err));
         }
 
-        let mut vocoder =
-            Module::from_file_path(vocoder_path, LoadMode::Mmap, None, None, None, false);
         let err = vocoder.load(Verification::Minimal);
         if err != EtError::Ok {
             return Err(EngineError::VocoderLoad(err));
