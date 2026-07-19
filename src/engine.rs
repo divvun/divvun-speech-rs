@@ -23,6 +23,17 @@ use executorch::runtime::core::tensor_shape_dynamism::TensorShapeDynamism;
 use executorch::runtime::executor::program::Verification;
 use mmap_io::segment::Segment;
 
+macro_rules! xnn_profile_stage {
+    ($stage:literal, $event:literal) => {
+        #[cfg(feature = "xnnpack-profiling")]
+        tracing::info!(
+            xnn_profile_stage = $stage,
+            xnn_profile_event = $event,
+            "XNN profile stage"
+        );
+    };
+}
+
 /// Vocoder hop length — audio samples per mel frame.
 pub const HOP_LENGTH: usize = 256;
 /// n_fft/2 for the Vocos vocoder (n_fft = 1024): the synthesis padding that
@@ -205,15 +216,25 @@ impl Engine {
         mut voice: Module<'static>,
         mut vocoder: Module<'static>,
     ) -> Result<Self, EngineError> {
+        let start = Instant::now();
         let err = voice.load(Verification::Minimal);
         if err != EtError::Ok {
             return Err(EngineError::VoiceLoad(err));
         }
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+            "voice program loaded"
+        );
 
+        let start = Instant::now();
         let err = vocoder.load(Verification::Minimal);
         if err != EtError::Ok {
             return Err(EngineError::VocoderLoad(err));
         }
+        tracing::info!(
+            elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+            "vocoder program loaded"
+        );
 
         // Split export (encode + decode methods, FastPitch cut at regulate_len)
         // vs single-pass `forward` export.
@@ -229,15 +250,27 @@ impl Engine {
         } else {
             &["forward"][..]
         } {
+            let start = Instant::now();
             let err = voice.load_method_with_defaults(method_name);
             if err != EtError::Ok {
                 return Err(EngineError::VoiceMethod(err));
             }
+            tracing::info!(
+                method = method_name,
+                elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+                "voice method loaded"
+            );
         }
+        let start = Instant::now();
         let err = vocoder.load_method_with_defaults("forward");
         if err != EtError::Ok {
             return Err(EngineError::VocoderMethod(err));
         }
+        tracing::info!(
+            method = "forward",
+            elapsed_ms = start.elapsed().as_secs_f64() * 1000.0,
+            "vocoder method loaded"
+        );
 
         // Introspect the voice model's input shapes: input 0 = tokens
         // [1, max_seq_len] (i64), 1 = speaker id, 2 = language id (i64), and —
@@ -403,10 +436,12 @@ impl Engine {
             EValue::from_tensor(self.voice_pace.tensor()),
         ];
         let voice_start = Instant::now();
+        xnn_profile_stage!("voice", "begin");
         let voice_outputs = self
             .voice
             .execute("forward", &voice_inputs)
             .map_err(EngineError::VoiceExecute)?;
+        xnn_profile_stage!("voice", "end");
         let voice_elapsed = voice_start.elapsed();
         let mel_start = Instant::now();
 
@@ -462,10 +497,12 @@ impl Engine {
         let vocoder_inputs = vec![EValue::from_tensor(self.vocoder_mel.tensor())];
         let mel_elapsed = mel_start.elapsed();
         let vocoder_start = Instant::now();
+        xnn_profile_stage!("vocoder", "begin");
         let vocoder_outputs = self
             .vocoder
             .execute("forward", &vocoder_inputs)
             .map_err(EngineError::VocoderExecute)?;
+        xnn_profile_stage!("vocoder", "end");
         let vocoder_elapsed = vocoder_start.elapsed();
         let audio_start = Instant::now();
 
@@ -547,10 +584,12 @@ impl Engine {
             EValue::from_tensor(self.voice_language.tensor()),
         ];
         let encode_start = Instant::now();
+        xnn_profile_stage!("encode", "begin");
         let encode_outputs = self
             .voice
             .execute("encode", &encode_inputs)
             .map_err(EngineError::VoiceExecute)?;
+        xnn_profile_stage!("encode", "end");
         let encode_elapsed = encode_start.elapsed();
 
         if encode_outputs.len() < 2 || !encode_outputs[0].is_tensor() || !encode_outputs[1].is_tensor()
@@ -635,10 +674,12 @@ impl Engine {
         // ---- decode: enc_rep [1, M, d_model] -> mel [1, 80, M] ----
         let decode_inputs = vec![EValue::from_tensor(enc_rep.tensor())];
         let decode_start = Instant::now();
+        xnn_profile_stage!("decode", "begin");
         let decode_outputs = self
             .voice
             .execute("decode", &decode_inputs)
             .map_err(EngineError::VoiceExecute)?;
+        xnn_profile_stage!("decode", "end");
         let decode_elapsed = decode_start.elapsed();
         if decode_outputs.is_empty() || !decode_outputs[0].is_tensor() {
             return Err(EngineError::VoiceOutput("decode output 0 is not a tensor"));
@@ -657,6 +698,7 @@ impl Engine {
         // ---- vocoder: dynamic [1, 80, M] if the export supports it, else pad
         // into the fixed [1, 80, T_max] (probed once, remembered) ----
         let vocoder_start = Instant::now();
+        xnn_profile_stage!("vocoder", "begin");
         let prior = self.split.as_ref().expect("split state").vocoder_dynamic;
         let mut used_dynamic = false;
         let mut vocoder_outputs = None;
@@ -721,6 +763,7 @@ impl Engine {
             }
         };
         self.split.as_mut().expect("split state").vocoder_dynamic = Some(used_dynamic);
+        xnn_profile_stage!("vocoder", "end");
         let vocoder_elapsed = vocoder_start.elapsed();
 
         let audio_start = Instant::now();

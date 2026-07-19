@@ -31,9 +31,9 @@ checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "bytemuck"
-version = "1.25.1"
+version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6aedf8ae72766347502cf3cb4f41cf5e9cc37d28bee90f1fdaaae15f9cf9424"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 dependencies = [
  "bytemuck_derive",
 ]
@@ -161,7 +161,7 @@ dependencies = [
 [[package]]
 name = "executorch"
 version = "0.1.0"
-source = "git+https://github.com/divvun/executorch-rs#9b49d92aa75185b3ebc42ef90831839ff0cb3f06"
+source = "git+https://github.com/divvun/executorch-rs#4e2e42b5ee877acb4aa0291e8da2bf5120abb7b0"
 dependencies = [
  "cmake",
  "executorch-macros",
@@ -178,7 +178,7 @@ dependencies = [
 [[package]]
 name = "executorch-macros"
 version = "0.1.0"
-source = "git+https://github.com/divvun/executorch-rs#9b49d92aa75185b3ebc42ef90831839ff0cb3f06"
+source = "git+https://github.com/divvun/executorch-rs#4e2e42b5ee877acb4aa0291e8da2bf5120abb7b0"
 dependencies = [
  "proc-macro2",
  "quote",

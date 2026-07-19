@@ -6,6 +6,9 @@ edition = "2024"
 [lib]
 crate-type = ["lib", "staticlib"]
 
+[features]
+xnnpack-profiling = ["executorch/xnnpack-profiling"]
+
 [dependencies]
 # Native Rust ExecuTorch port (replaces the old C++ FFI wrapper). The `xnnpack`
 # feature builds/links the native XNNPACK submodule so the delegated
