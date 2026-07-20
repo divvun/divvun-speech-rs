@@ -161,7 +161,7 @@ dependencies = [
 [[package]]
 name = "executorch"
 version = "0.1.0"
-source = "git+https://github.com/divvun/executorch-rs#4e2e42b5ee877acb4aa0291e8da2bf5120abb7b0"
+source = "git+https://github.com/divvun/executorch-rs#5269b7d11566c8074fc285dcd54a22df01bde59e"
 dependencies = [
  "cmake",
  "executorch-macros",
@@ -178,7 +178,7 @@ dependencies = [
 [[package]]
 name = "executorch-macros"
 version = "0.1.0"
-source = "git+https://github.com/divvun/executorch-rs#4e2e42b5ee877acb4aa0291e8da2bf5120abb7b0"
+source = "git+https://github.com/divvun/executorch-rs#5269b7d11566c8074fc285dcd54a22df01bde59e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -380,7 +380,7 @@ checksum = "77060ebe535362c3da75682cd17b0431017b6e7c5661e714fc69a7ad017d1301"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.1",
 ]
 
 [[package]]
@@ -703,7 +703,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.1",
 ]
 
 [[package]]
@@ -759,9 +759,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2fac314a64dc9a36e61a9eb4261a5e9bbfbc922b27e518af97bc32b926cf967"
+checksum = "5edbec4ed188954a10c12c038215f8ce7606b2d5c973cd8dc43e8795065c5f2f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -819,7 +819,7 @@ checksum = "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.0",
+ "syn 3.0.1",
 ]
 
 [[package]]
