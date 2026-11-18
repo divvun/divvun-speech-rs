@@ -16,7 +16,7 @@ xnnpack-profiling = ["executorch/xnnpack-profiling"]
 # the exact commit.
 executorch = { git = "https://github.com/divvun/executorch-rs", features = ["xnnpack"] }
 libc = "0.2"
-mmap-io = "0.9.4"
+mmap-io = { git = "https://github.com/necessary-nu/mmap-io" }
 thiserror = "2"
 serde_json = "1"
 tracing = "0.1"

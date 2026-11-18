@@ -12,12 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -414,27 +408,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "memmap2"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f49388d20533534cd19360ad3d6a7dadc885944aa802ba3995040c5ec11288c6"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "mmap-io"
-version = "0.9.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fe18ca588f2b6483c447d2ec09e1f65470a2d8bf3f04e7f7bd78740d67e9080"
+version = "0.1.0"
+source = "git+https://github.com/necessary-nu/mmap-io#e012ecd3795e66ce92442883357bd56ffff8ace7"
 dependencies = [
- "anyhow",
- "cfg-if",
  "libc",
  "log",
- "memmap2",
  "parking_lot",
- "thiserror 1.0.69",
 ]
 
 [[package]]
